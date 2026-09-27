@@ -9,3 +9,4 @@ CMakeUserPresets.json
 shooter_offsets.txt
 screenshot*.png
 shooter_results.csv
+shooter_settings.ini

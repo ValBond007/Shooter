@@ -19,7 +19,14 @@ struct PlayerInput {
     bool  reload = false;   // reload key pressed this frame
     int   selectWeapon = -1;  // 0..2 = switch weapon, -1 = no change
     bool  dash = false;     // dash key pressed this frame
+    bool  throwGrenade = false;  // grenade key pressed this frame (thrown at aimWorld)
 };
+
+constexpr float kBarrelRadius    = 20.0f;
+constexpr float kExplosionRadius = 150.0f;
+constexpr float kBuffDuration    = 8.0f;
+constexpr int   kMaxShield       = 50;
+constexpr int   kMaxGrenadesHeld = 3;
 
 // What the player picked in the main menu.
 struct MatchSettings {
@@ -95,13 +102,14 @@ struct BotBrain {
     float baseSpeed     = 240.0f;
     float stuckTimer    = 0.0f;
     float lastSeenTimer = 99.0f;  // seconds since the target was last seen
+    float grenadeCooldown = 5.0f;
     int   target        = -1;     // entity slot this bot is fighting
     float retargetTimer = 0.0f;
     Vec2f lastSeenPos{0, 0};
     Vec2f wanderTarget{0, 0};
 };
 
-enum class EffectType { Spark, Blood, Death, Muzzle, Corpse, Pickup };
+enum class EffectType { Spark, Blood, Death, Muzzle, Corpse, Pickup, Explosion, Scorch };
 
 struct Effect {
     EffectType type;
@@ -129,13 +137,19 @@ struct KillFeedEntry {
 enum class GameEventType {
     Shot, PlayerShot, Hit, PlayerHitEnemy, PlayerHurt, Kill, PlayerKill, PlayerDied,
     Reload, ReloadDone, Empty, WeaponSwitch, Pickup, WallHit, Respawn, Dash, WaveStart,
-    MatchEnd,
+    MatchEnd, Explosion, GrenadeThrow, PowerUp,
 };
 
 struct GameEvent {
     GameEventType type;
     Vec2f         pos;
     uint32_t      weapon = 0;
+};
+
+// Red arc around the player showing where damage came from.
+struct DamageIndicator {
+    float angle;  // world angle from the player to the attacker
+    float time;   // age in seconds
 };
 
 struct Announcement {
@@ -203,6 +217,8 @@ public:
     int   KillStreak() const { return killStreak_; }
     float PickupRespawn(int i) const { return pickupTimers_[i]; }
     float DashCooldown() const { return dashCooldown_; }
+    const std::vector<DamageIndicator>& DamageIndicators() const { return damageIndicators_; }
+    const std::string& DeathRecap() const { return deathRecap_; }
     static constexpr float kDashCooldown = 1.2f;
 
     int shotsFired = 0;
@@ -231,7 +247,17 @@ private:
 
     void FireBullets(int slot, float angle, float speed, int damage, int pellets, float spread,
                      float life, bool heavy);
-    void ApplyDamage(int victim, int attacker, int damage, Vec2f hitPos, float angle);
+    // cause: what did the damage for the death recap (nullptr = attacker's weapon)
+    void ApplyDamage(int victim, int attacker, int damage, Vec2f hitPos, float angle, const char* cause = nullptr);
+
+    void UpdateGrenades(float dt);
+    void UpdateBarrels(float dt);
+    void UpdateBuffs(float dt);
+    bool ThrowGrenade(int slot, Vec2f target);
+    void Explode(Vec2f pos, int owner, uint32_t team, int damage, float radius, const char* cause);
+    void DamageBarrel(int barrel, int attacker, int damage);
+    void ApplyPickup(int slot, uint32_t type);
+    uint32_t RandomPowerup();
     void Announce(const std::string& text);
     void Emit(GameEventType type, Vec2f pos, uint32_t weapon = 0) { events_.push_back({type, pos, weapon}); }
 
@@ -273,6 +299,14 @@ private:
     float         matchTime_ = 0.0f;   // seconds played
     float         waveBreak_ = 0.0f;   // survival: countdown to the next wave
     int           playerDeathsAllowed_ = 0;
+
+    // barrels (index = GameMemory::barrels)
+    float barrelTimers_[gm::kMaxBarrels] = {};
+    int   barrelAttacker_[gm::kMaxBarrels] = {};
+    bool  barrelPending_[gm::kMaxBarrels] = {};  // explodes next tick (chain reactions)
+
+    std::vector<DamageIndicator> damageIndicators_;
+    std::string                  deathRecap_;
 
     // player dash
     float dashTimer_ = 0.0f;

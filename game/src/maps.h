@@ -9,6 +9,8 @@ struct MapDef {
     const char*               name;
     std::vector<gm::Obstacle> walls;
     std::vector<gm::Vec2f>    healthPacks;
+    std::vector<gm::Vec2f>    powerups;   // random power-up (speed / damage / shield / grenade)
+    std::vector<gm::Vec2f>    barrels;    // explosive barrels
 };
 
 int           MapCount();

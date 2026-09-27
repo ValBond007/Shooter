@@ -1,4 +1,4 @@
-# Memory layout (layout version 3)
+# Memory layout (layout version 4)
 
 Source of truth: [`shared/game_memory.h`](../shared/game_memory.h). Every offset
 below is checked there with `static_assert`, so these tables can't silently
@@ -22,13 +22,13 @@ g_game = moduleBase("shooter.exe") + RVA
 `SizeOfImage` comes from the PE header: `e_lfanew = *(i32*)(base + 0x3C)`, then
 `SizeOfImage = *(u32*)(base + e_lfanew + 0x50)`.
 
-## `GameMemory` (size 0xFA0)
+## `GameMemory` (size 0x14A0)
 
 | Offset | Type | Name | Notes |
 |---:|---|---|---|
 | 0x000 | char[16] | `magic` | `"ARENA_SHOOTER!!"` |
-| 0x010 | u32 | `layoutVersion` | 3 |
-| 0x014 | u32 | `structSize` | 0xFA0 |
+| 0x010 | u32 | `layoutVersion` | 4 |
+| 0x014 | u32 | `structSize` | 0x14A0 |
 | 0x018 | u64 | `selfAddress` | address of `g_game` itself |
 | 0x020 | u32 | `frameCount` | +1 per rendered frame |
 | 0x024 | f32 | `gameTime` | seconds |
@@ -53,6 +53,10 @@ g_game = moduleBase("shooter.exe") + RVA
 | 0xC80 | Obstacle[32] | `obstacles` | stride 0x10 |
 | 0xE80 | Pickup[16] | `pickups` | stride 0x10 |
 | 0xF80 | MatchInfo | `match` | see below |
+| 0xFA0 | Grenade[16] | `grenades` | stride 0x20 |
+| 0x11A0 | Barrel[8] | `barrels` | stride 0x10 |
+| 0x1220 | u8[0x80] | reserved | |
+| 0x12A0 | EntityBuffs[32] | `buffs` | stride 0x10, same index as `entities` |
 
 ## `Entity` (size 0x60)
 
@@ -96,7 +100,7 @@ g_game = moduleBase("shooter.exe") + RVA
 | Offset | Type | Name | Notes |
 |---:|---|---|---|
 | 0x00 | vec2 | `pos` | world position |
-| 0x08 | u32 | `type` | 0 = health pack |
+| 0x08 | u32 | `type` | 0 health, 1 speed, 2 double damage, 3 shield, 4 grenade |
 | 0x0C | u32 | `available` | 0 while respawning |
 
 ## `MatchInfo` (size 0x20, at `g_game + 0xF80`)
@@ -110,6 +114,36 @@ g_game = moduleBase("shooter.exe") + RVA
 | 0x10 | i32[2] | `teamScore` | kills of team 0 / team 1 |
 | 0x18 | u32 | `wave` | survival wave |
 | 0x1C | i32 | `livesLeft` | survival lives |
+
+## `Grenade` (size 0x20)
+
+| Offset | Type | Name | Notes |
+|---:|---|---|---|
+| 0x00 | vec2 | `pos` | |
+| 0x08 | vec2 | `vel` | slows down over time |
+| 0x10 | f32 | `fuse` | seconds until it explodes (blast radius 150) |
+| 0x14 | u32 | `active` | |
+| 0x18 | u32 | `team` | team of the thrower |
+| 0x1C | i32 | `owner` | entity index of the thrower |
+
+## `Barrel` (size 0x10)
+
+| Offset | Type | Name | Notes |
+|---:|---|---|---|
+| 0x00 | vec2 | `pos` | center, radius 20 |
+| 0x08 | i32 | `health` | 30 when full |
+| 0x0C | u32 | `alive` | 0 after exploding (back after 25 s) |
+
+## `EntityBuffs` (size 0x10)
+
+`buffs[i]` belongs to `entities[i]`.
+
+| Offset | Type | Name | Notes |
+|---:|---|---|---|
+| 0x00 | f32 | `speedTime` | seconds of speed boost left |
+| 0x04 | f32 | `damageTime` | seconds of double damage left |
+| 0x08 | i32 | `shield` | 0..50, absorbs damage before health |
+| 0x0C | i32 | `grenades` | grenades carried |
 
 ## World → screen
 

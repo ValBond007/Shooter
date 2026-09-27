@@ -47,6 +47,16 @@ constexpr int   kSurvivalLives    = 3;
 constexpr float kWaveBreakTime    = 4.0f;
 constexpr float kTrainingRespawn  = 0.35f;  // pause between training targets
 
+// ---- grenades, barrels, power-ups -----------------------------------------------------------
+constexpr float kGrenadeFuse       = 1.5f;
+constexpr float kGrenadeFriction   = 2.2f;    // velocity *= exp(-friction * t)
+constexpr float kGrenadeMaxRange   = 700.0f;
+constexpr int   kGrenadeDamage     = 110;
+constexpr int   kBarrelHealth      = 30;
+constexpr int   kBarrelDamage      = 120;
+constexpr float kBarrelRespawn     = 25.0f;
+constexpr float kPowerupRespawn    = 30.0f;
+
 // ---- player weapons (index = gm::WeaponId) ------------------------------------------
 //                          name       delay  speed  dmg pel spread  mag reload life  shake
 const WeaponDef kWeapons[gm::kWeaponCount] = {
@@ -253,6 +263,33 @@ void Game::BuildArena(int map) {
         pickupTimers_[i] = 0.0f;
         ++i;
     }
+    for (Vec2f p : def.powerups) {
+        if (i >= gm::kMaxPickups) break;
+        mem_.pickups[i].pos = p;
+        mem_.pickups[i].type = RandomPowerup();
+        mem_.pickups[i].available = 1;
+        pickupTimers_[i] = 0.0f;
+        ++i;
+    }
+
+    std::memset(mem_.barrels, 0, sizeof(mem_.barrels));
+    int b = 0;
+    for (Vec2f p : def.barrels) {
+        if (b >= gm::kMaxBarrels) break;
+        mem_.barrels[b].pos = p;
+        mem_.barrels[b].health = kBarrelHealth;
+        mem_.barrels[b].alive = 1;
+        barrelTimers_[b] = 0.0f;
+        barrelPending_[b] = false;
+        barrelAttacker_[b] = -1;
+        ++b;
+    }
+    std::memset(mem_.grenades, 0, sizeof(mem_.grenades));
+}
+
+uint32_t Game::RandomPowerup() {
+    static const uint32_t types[] = {gm::PICKUP_SPEED, gm::PICKUP_DAMAGE, gm::PICKUP_SHIELD, gm::PICKUP_GRENADE};
+    return types[RandI(0, 3)];
 }
 
 // Which team does entity slot `slot` play for in the current mode?
@@ -285,6 +322,9 @@ void Game::StartMatch(const MatchSettings& settings) {
     matchTime_ = 0.0f;
     waveBreak_ = 0.0f;
     dashTimer_ = dashCooldown_ = 0.0f;
+    damageIndicators_.clear();
+    deathRecap_.clear();
+    std::memset(mem_.buffs, 0, sizeof(mem_.buffs));
 
     std::memset(&mem_.match, 0, sizeof(mem_.match));
     mem_.match.mode  = settings_.mode;
@@ -432,6 +472,10 @@ void Game::SpawnEntity(int slot) {
     e.reloadTimer  = 0.0f;
     e.visible      = 0;
     hitFlash_[slot] = 0.0f;
+    gm::EntityBuffs& buff = mem_.buffs[slot];
+    buff.speedTime = buff.damageTime = 0.0f;
+    buff.shield = 0;
+    buff.grenades = isPlayer ? 2 : 1;
 
     if (isPlayer) {
         e.pos       = FindSpawnPoint(e.team);
@@ -507,6 +551,15 @@ Vec2f Game::MoveCircle(Vec2f& pos, Vec2f delta, float radius) const {
             }
         }
     }
+    // Barrels are round obstacles.
+    for (int i = 0; i < gm::kMaxBarrels; ++i) {
+        const gm::Barrel& b = mem_.barrels[i];
+        if (!b.alive) continue;
+        Vec2f diff = pos - b.pos;
+        float minDist = radius + kBarrelRadius;
+        float d = Length(diff);
+        if (d < minDist && d > 1e-4f) pos += diff / d * (minDist - d);
+    }
     pos.x = Clampf(pos.x, radius, kArenaW - radius);
     pos.y = Clampf(pos.y, radius, kArenaH - radius);
     return pos - start;
@@ -554,7 +607,10 @@ void Game::Tick(const PlayerInput& input) {
         if (e.active && e.alive) UpdateBot(i, dt);
     }
     UpdateBullets(dt);
+    UpdateGrenades(dt);
+    UpdateBarrels(dt);
     UpdatePickups(dt);
+    UpdateBuffs(dt);
     UpdateRespawns(dt);
     UpdateEffects(dt);
     UpdateVisibility();
@@ -803,7 +859,8 @@ void Game::UpdatePlayer(const PlayerInput& input, float dt) {
         dashTimer_ -= dt;
         p.vel = dashDir_ * kDashSpeed;
     } else {
-        Vec2f wish = Normalize(input.move) * kPlayerSpeed;
+        float speed = kPlayerSpeed * (mem_.buffs[0].speedTime > 0.0f ? 1.4f : 1.0f);
+        Vec2f wish = Normalize(input.move) * speed;
         p.vel = MoveTowards(p.vel, wish, kPlayerAccel * dt);
     }
     Vec2f moved = MoveCircle(p.pos, p.vel * dt, p.radius);
@@ -812,6 +869,8 @@ void Game::UpdatePlayer(const PlayerInput& input, float dt) {
 
     Vec2f toAim = input.aimWorld - p.pos;
     if (LengthSq(toAim) > 1.0f) p.aimAngle = AngleOf(toAim);
+
+    if (input.throwGrenade && ThrowGrenade(0, input.aimWorld)) spawnProtection_ = 0.0f;
 
     // ---- shooting --------------------------------------------------------------------
     if (input.shoot && playerFireCooldown_ <= 0.0f && p.reloadTimer <= 0.0f) {
@@ -873,6 +932,7 @@ void Game::UpdateBot(int slot, float dt) {
     b.reaction      -= dt;
     b.lastSeenTimer += dt;
     b.retargetTimer -= dt;
+    b.grenadeCooldown -= dt;
 
     if (bot.reloadTimer > 0.0f) {
         bot.reloadTimer -= dt;
@@ -911,6 +971,14 @@ void Game::UpdateBot(int slot, float dt) {
         b.lastSeenPos = tgt->pos;
     }
     bool engaging = tgt && b.lastSeenTimer < 3.0f;
+
+    // Target hiding behind cover? Throw a grenade where it was last seen.
+    if (engaging && !seesTarget && !training && !botsPeaceful && b.grenadeCooldown <= 0.0f &&
+        b.lastSeenTimer > 0.4f && b.lastSeenTimer < 2.5f && bot.kind != gm::KIND_RUNNER &&
+        Distance(bot.pos, b.lastSeenPos) < 650.0f && Distance(bot.pos, b.lastSeenPos) > 200.0f) {
+        if (ThrowGrenade(slot, b.lastSeenPos + Vec2f{RandF(-40, 40), RandF(-40, 40)})) b.grenadeCooldown = RandF(8.0f, 14.0f);
+        else b.grenadeCooldown = 3.0f;
+    }
 
     // Low on health? Go for a health pack.
     int pack = -1;
@@ -963,6 +1031,14 @@ void Game::UpdateBot(int slot, float dt) {
         // Training targets strafe around where they are.
         desired = Normalize(Perp(Normalize(Player().pos - bot.pos)) * b.strafeDir);
     } else {
+        // Nothing to fight: grab a nearby power-up, otherwise wander.
+        for (int i = 0; i < gm::kMaxPickups; ++i) {
+            const gm::Pickup& pk = mem_.pickups[i];
+            if (pk.available && pk.type != gm::PICKUP_HEALTH && Distance(bot.pos, pk.pos) < 600.0f) {
+                b.wanderTarget = pk.pos;
+                break;
+            }
+        }
         desired = Normalize(Rotate(b.wanderTarget - bot.pos, b.jitterAngle * 0.3f));
     }
 
@@ -979,6 +1055,7 @@ void Game::UpdateBot(int slot, float dt) {
     desired = Normalize(desired);
 
     float speed = b.baseSpeed * diff.speed * (b.dashTimer > 0.0f ? 2.3f : 1.0f);
+    if (mem_.buffs[slot].speedTime > 0.0f) speed *= 1.4f;
     if (botsFrozen) speed = 0.0f;
 
     bot.vel = MoveTowards(bot.vel, desired * speed, kBotAccel * dt);
@@ -1035,6 +1112,7 @@ void Game::UpdateBot(int slot, float dt) {
 void Game::FireBullets(int slot, float angle, float speed, int damage, int pellets, float spread,
                        float life, bool heavy) {
     const gm::Entity& e = mem_.entities[slot];
+    if (mem_.buffs[slot].damageTime > 0.0f) damage *= 2;
     for (int i = 0; i < pellets; ++i) {
         float a = angle;
         if (pellets > 1) a += spread * (static_cast<float>(i) / (pellets - 1) - 0.5f) + RandF(-0.03f, 0.03f);
@@ -1092,6 +1170,16 @@ void Game::UpdateBullets(float dt) {
                 hitEntity = i;
             }
         }
+        int hitBarrel = -1;
+        for (int i = 0; i < gm::kMaxBarrels; ++i) {
+            if (!mem_.barrels[i].alive) continue;
+            float t;
+            if (SegmentVsCircle(bl.pos, next, mem_.barrels[i].pos, kBarrelRadius + kBulletRadius, t) && t < bestT) {
+                bestT = t;
+                hitEntity = -1;
+                hitBarrel = i;
+            }
+        }
         bool outside = next.x < 0 || next.y < 0 || next.x > kArenaW || next.y > kArenaH;
 
         if (bestT <= 1.0f) {
@@ -1099,6 +1187,9 @@ void Game::UpdateBullets(float dt) {
             float angle = AngleOf(bl.vel);
             if (hitEntity >= 0) {
                 ApplyDamage(hitEntity, bl.owner, bl.damage, hitPos, angle);
+            } else if (hitBarrel >= 0) {
+                effects_.push_back({EffectType::Spark, hitPos, angle, 0.0f, 0.25f, bl.team});
+                DamageBarrel(hitBarrel, bl.owner, bl.damage);
             } else {
                 effects_.push_back({EffectType::Spark, hitPos, angle, 0.0f, 0.25f, bl.team});
                 if (bl.owner == static_cast<int>(mem_.localPlayerIndex)) Emit(GameEventType::WallHit, hitPos);
@@ -1118,7 +1209,7 @@ void Game::Announce(const std::string& text) {
     announcement_.time = 0.0f;
 }
 
-void Game::ApplyDamage(int victim, int attacker, int damage, Vec2f hitPos, float angle) {
+void Game::ApplyDamage(int victim, int attacker, int damage, Vec2f hitPos, float angle, const char* cause) {
     if (mem_.match.state != gm::MATCH_PLAYING) return;
     gm::Entity& v = mem_.entities[victim];
     if (!v.alive) return;
@@ -1126,6 +1217,20 @@ void Game::ApplyDamage(int victim, int attacker, int damage, Vec2f hitPos, float
     bool attackerIsPlayer = attacker == static_cast<int>(mem_.localPlayerIndex);
 
     if (victimIsPlayer && (godMode || spawnProtection_ > 0.0f || settings_.mode == gm::MODE_TRAINING)) damage = 0;
+
+    // Where did it come from? (red arc on the HUD)
+    if (victimIsPlayer && damage > 0) {
+        Vec2f from = attacker >= 0 && attacker != victim ? mem_.entities[attacker].pos : hitPos;
+        damageIndicators_.push_back({AngleOf(from - v.pos), 0.0f});
+    }
+
+    // Shield absorbs damage first.
+    gm::EntityBuffs& buff = mem_.buffs[victim];
+    if (buff.shield > 0 && damage > 0) {
+        int absorbed = std::min(buff.shield, damage);
+        buff.shield -= absorbed;
+        damage -= absorbed;
+    }
 
     effects_.push_back({EffectType::Blood, hitPos, angle, 0.0f, 0.3f, v.team});
     hitFlash_[victim] = 0.1f;
@@ -1155,7 +1260,7 @@ void Game::ApplyDamage(int victim, int attacker, int damage, Vec2f hitPos, float
     v.reloadTimer = 0.0f;
     v.deaths++;
     v.respawnTimer = victimIsPlayer ? kPlayerRespawn : kBotRespawn;
-    if (attacker >= 0) mem_.entities[attacker].kills++;
+    if (attacker >= 0 && attacker != victim) mem_.entities[attacker].kills++;
     effects_.push_back({EffectType::Death, v.pos, angle, 0.0f, 0.6f, v.team, v.radius});
     effects_.push_back({EffectType::Corpse, v.pos, angle, 0.0f, 8.0f, v.team, v.radius});
     Emit(victimIsPlayer ? GameEventType::PlayerDied : (attackerIsPlayer ? GameEventType::PlayerKill
@@ -1170,6 +1275,13 @@ void Game::ApplyDamage(int victim, int attacker, int damage, Vec2f hitPos, float
     if (victimIsPlayer) {
         killStreak_ = 0;
         multiKill_ = 0;
+        // death recap
+        std::string what = cause ? cause : (attacker >= 0 ? GetWeaponDef(mem_.entities[attacker].weapon).name : "?");
+        if (attacker == victim) deathRecap_ = std::string("Killed by your own ") + what;
+        else if (attacker >= 0)
+            deathRecap_ = std::string("Killed by ") + mem_.entities[attacker].name + " (" +
+                          KindName(mem_.entities[attacker].kind) + ") - " + what;
+        else deathRecap_ = std::string("Killed by ") + what;
     } else if (attackerIsPlayer) {
         ++killStreak_;
         multiKill_ = multiKillTimer_ > 0.0f ? multiKill_ + 1 : 1;
@@ -1186,25 +1298,174 @@ void Game::ApplyDamage(int victim, int attacker, int damage, Vec2f hitPos, float
     OnKill(victim, attacker);
 }
 
+void Game::ApplyPickup(int slot, uint32_t type) {
+    gm::Entity& e = mem_.entities[slot];
+    gm::EntityBuffs& b = mem_.buffs[slot];
+    switch (type) {
+        case gm::PICKUP_HEALTH:
+            e.health = std::min(e.maxHealth, e.health + kHealthPackAmount * e.maxHealth / 100);
+            break;
+        case gm::PICKUP_SPEED:   b.speedTime = kBuffDuration; break;
+        case gm::PICKUP_DAMAGE:  b.damageTime = kBuffDuration; break;
+        case gm::PICKUP_SHIELD:  b.shield = kMaxShield; break;
+        case gm::PICKUP_GRENADE: b.grenades = std::min(kMaxGrenadesHeld, b.grenades + 1); break;
+        default: break;
+    }
+}
+
 void Game::UpdatePickups(float dt) {
     for (int i = 0; i < gm::kMaxPickups; ++i) {
         gm::Pickup& p = mem_.pickups[i];
         if (p.pos.x == 0.0f && p.pos.y == 0.0f) continue;  // unused slot
+        bool isHealth = p.type == gm::PICKUP_HEALTH;
         if (!p.available) {
             pickupTimers_[i] -= dt;
-            if (pickupTimers_[i] <= 0.0f) p.available = 1;
+            if (pickupTimers_[i] <= 0.0f) {
+                p.available = 1;
+                if (!isHealth) p.type = RandomPowerup();  // power-ups come back as a random type
+            }
             continue;
         }
         for (int e = 0; e < gm::kMaxEntities; ++e) {
             gm::Entity& ent = mem_.entities[e];
-            if (!ent.active || !ent.alive || ent.health >= ent.maxHealth) continue;
+            if (!ent.active || !ent.alive) continue;
             if (Distance(ent.pos, p.pos) > ent.radius + kPickupRadius) continue;
-            ent.health = std::min(ent.maxHealth, ent.health + kHealthPackAmount * ent.maxHealth / 100);
+            // Only take what is useful.
+            if (isHealth && ent.health >= ent.maxHealth) continue;
+            if (p.type == gm::PICKUP_GRENADE && mem_.buffs[e].grenades >= kMaxGrenadesHeld) continue;
+            ApplyPickup(e, p.type);
             p.available = 0;
-            pickupTimers_[i] = kHealthPackRespawn;
-            effects_.push_back({EffectType::Pickup, p.pos, 0.0f, 0.0f, 0.5f, ent.team});
-            if (e == static_cast<int>(mem_.localPlayerIndex)) Emit(GameEventType::Pickup, p.pos);
+            pickupTimers_[i] = isHealth ? kHealthPackRespawn : kPowerupRespawn;
+            effects_.push_back({EffectType::Pickup, p.pos, 0.0f, 0.0f, 0.5f, ent.team, static_cast<float>(p.type)});
+            if (e == static_cast<int>(mem_.localPlayerIndex))
+                Emit(isHealth ? GameEventType::Pickup : GameEventType::PowerUp, p.pos, p.type);
             break;
+        }
+    }
+}
+
+void Game::UpdateBuffs(float dt) {
+    for (gm::EntityBuffs& b : mem_.buffs) {
+        b.speedTime = std::max(0.0f, b.speedTime - dt);
+        b.damageTime = std::max(0.0f, b.damageTime - dt);
+    }
+    for (DamageIndicator& d : damageIndicators_) d.time += dt;
+    damageIndicators_.erase(std::remove_if(damageIndicators_.begin(), damageIndicators_.end(),
+                                           [](const DamageIndicator& d) { return d.time > 1.2f; }),
+                            damageIndicators_.end());
+}
+
+// -----------------------------------------------------------------------------
+//  Grenades, explosions, barrels
+// -----------------------------------------------------------------------------
+
+bool Game::ThrowGrenade(int slot, Vec2f target) {
+    gm::Entity& e = mem_.entities[slot];
+    gm::EntityBuffs& b = mem_.buffs[slot];
+    if (!e.alive || b.grenades <= 0) return false;
+
+    int free = -1;
+    for (int i = 0; i < gm::kMaxGrenades; ++i)
+        if (!mem_.grenades[i].active) { free = i; break; }
+    if (free < 0) return false;
+
+    Vec2f to = target - e.pos;
+    float dist = std::min(Length(to), kGrenadeMaxRange);
+    Vec2f dir = LengthSq(to) > 1.0f ? Normalize(to) : FromAngle(e.aimAngle);
+    // With friction the grenade travels v0 / k * (1 - e^(-k t)): pick v0 so
+    // it stops at the target just before the fuse runs out.
+    float travel = (1.0f - std::exp(-kGrenadeFriction * kGrenadeFuse)) / kGrenadeFriction;
+    float v0 = dist / travel;
+
+    gm::Grenade& g = mem_.grenades[free];
+    g.pos = e.pos + dir * (e.radius + 6.0f);
+    if (CircleHitsObstacle(g.pos, 6.0f)) g.pos = e.pos;
+    g.vel = dir * v0;
+    g.fuse = kGrenadeFuse;
+    g.active = 1;
+    g.team = e.team;
+    g.owner = slot;
+    b.grenades--;
+    Emit(GameEventType::GrenadeThrow, e.pos);
+    return true;
+}
+
+void Game::UpdateGrenades(float dt) {
+    const float r = 6.0f;
+    for (gm::Grenade& g : mem_.grenades) {
+        if (!g.active) continue;
+        g.vel *= std::exp(-kGrenadeFriction * dt);
+
+        // Move one axis at a time and bounce off walls.
+        Vec2f p = g.pos;
+        p.x += g.vel.x * dt;
+        if (CircleHitsObstacle(p, r) || p.x < r || p.x > kArenaW - r) { p.x = g.pos.x; g.vel.x *= -0.5f; }
+        p.y += g.vel.y * dt;
+        if (CircleHitsObstacle(p, r) || p.y < r || p.y > kArenaH - r) { p.y = g.pos.y; g.vel.y *= -0.5f; }
+        g.pos = p;
+
+        g.fuse -= dt;
+        if (g.fuse <= 0.0f) {
+            g.active = 0;
+            Explode(g.pos, g.owner, g.team, kGrenadeDamage, kExplosionRadius, "Grenade");
+        }
+    }
+}
+
+void Game::Explode(Vec2f pos, int owner, uint32_t team, int damage, float radius, const char* cause) {
+    effects_.push_back({EffectType::Explosion, pos, 0.0f, 0.0f, 0.6f, team, radius});
+    effects_.push_back({EffectType::Scorch, pos, RandF(0, 6.28f), 0.0f, 14.0f, team, radius * 0.5f});
+    Emit(GameEventType::Explosion, pos);
+
+    for (int i = 0; i < gm::kMaxEntities; ++i) {
+        const gm::Entity& e = mem_.entities[i];
+        if (!e.active || !e.alive) continue;
+        if (e.team == team && i != owner) continue;  // no friendly fire (neutral barrels hurt everyone)
+        float d = std::max(0.0f, Distance(pos, e.pos) - e.radius);
+        if (d >= radius || !LineOfSight(pos, e.pos)) continue;  // walls protect
+        float falloff = 1.0f - d / radius;
+        int dmg = static_cast<int>(damage * falloff * (i == owner ? 0.5f : 1.0f));
+        if (dmg > 0) ApplyDamage(i, owner, dmg, e.pos, AngleOf(e.pos - pos), cause);
+    }
+    // Chain reaction: barrels in range explode too (next tick).
+    for (int i = 0; i < gm::kMaxBarrels; ++i) {
+        const gm::Barrel& b = mem_.barrels[i];
+        if (b.alive && Distance(pos, b.pos) < radius + kBarrelRadius) DamageBarrel(i, owner, 1000);
+    }
+}
+
+void Game::DamageBarrel(int barrel, int attacker, int damage) {
+    gm::Barrel& b = mem_.barrels[barrel];
+    if (!b.alive) return;
+    b.health -= damage;
+    barrelAttacker_[barrel] = attacker;
+    if (b.health <= 0) barrelPending_[barrel] = true;
+}
+
+void Game::UpdateBarrels(float dt) {
+    const uint32_t kNeutral = 0xFFFFFFFFu;
+    for (int i = 0; i < gm::kMaxBarrels; ++i) {
+        gm::Barrel& b = mem_.barrels[i];
+        if (b.pos.x == 0.0f && b.pos.y == 0.0f) continue;  // unused slot
+        if (barrelPending_[i]) {
+            barrelPending_[i] = false;
+            b.alive = 0;
+            b.health = 0;
+            barrelTimers_[i] = kBarrelRespawn;
+            Explode(b.pos, barrelAttacker_[i], kNeutral, kBarrelDamage, kExplosionRadius * 1.1f, "Barrel explosion");
+            continue;
+        }
+        if (!b.alive) {
+            barrelTimers_[i] -= dt;
+            if (barrelTimers_[i] > 0.0f) continue;
+            // Don't respawn on top of someone.
+            bool blocked = false;
+            for (const gm::Entity& e : mem_.entities)
+                if (e.active && e.alive && Distance(e.pos, b.pos) < e.radius + kBarrelRadius + 4.0f) blocked = true;
+            if (!blocked) {
+                b.alive = 1;
+                b.health = kBarrelHealth;
+            }
         }
     }
 }

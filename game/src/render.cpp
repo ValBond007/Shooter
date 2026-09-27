@@ -136,24 +136,98 @@ void DrawObstacles(const gm::GameMemory& mem) {
     }
 }
 
+Color PickupColor(uint32_t type) {
+    switch (type) {
+        case gm::PICKUP_SPEED:   return Color{80, 220, 255, 255};
+        case gm::PICKUP_DAMAGE:  return Color{255, 90, 60, 255};
+        case gm::PICKUP_SHIELD:  return Color{110, 140, 255, 255};
+        case gm::PICKUP_GRENADE: return Color{150, 200, 90, 255};
+        default:                 return kHealthGreen;
+    }
+}
+
+const char* PickupLabel(uint32_t type) {
+    switch (type) {
+        case gm::PICKUP_SPEED:   return "SPEED";
+        case gm::PICKUP_DAMAGE:  return "x2 DMG";
+        case gm::PICKUP_SHIELD:  return "SHIELD";
+        case gm::PICKUP_GRENADE: return "GRENADE";
+        default:                 return "HEALTH";
+    }
+}
+
 void DrawPickups(const Game& game, const gm::GameMemory& mem) {
     float t = mem.gameTime;
     for (int i = 0; i < gm::kMaxPickups; ++i) {
         const gm::Pickup& p = mem.pickups[i];
         if (p.pos.x == 0.0f && p.pos.y == 0.0f) continue;
         Vector2 c = V(p.pos);
+        Color col = PickupColor(p.type);
+        bool health = p.type == gm::PICKUP_HEALTH;
         if (!p.available) {
             // respawning: faint outline + timer ring
-            float frac = 1.0f - game.PickupRespawn(i) / 20.0f;
-            DrawCircleLinesV(c, 14.0f, WithAlpha(kHealthGreen, 0.25f));
-            DrawRing(c, 15.0f, 17.0f, -90.0f, -90.0f + 360.0f * frac, 24, WithAlpha(kHealthGreen, 0.35f));
+            float frac = 1.0f - game.PickupRespawn(i) / (health ? 20.0f : 30.0f);
+            DrawCircleLinesV(c, 14.0f, WithAlpha(health ? col : WHITE, 0.25f));
+            DrawRing(c, 15.0f, 17.0f, -90.0f, -90.0f + 360.0f * frac, 24, WithAlpha(health ? col : WHITE, 0.35f));
             continue;
         }
         float pulse = 0.5f + 0.5f * std::sin(t * 4.0f + i);
-        DrawCircleV(c, 20.0f + 4.0f * pulse, WithAlpha(kHealthGreen, 0.12f + 0.08f * pulse));
-        DrawRectangleRounded(Rectangle{c.x - 13, c.y - 13, 26, 26}, 0.3f, 6, Color{235, 240, 235, 255});
-        DrawRectangle(static_cast<int>(c.x - 3), static_cast<int>(c.y - 9), 6, 18, Color{220, 50, 60, 255});
-        DrawRectangle(static_cast<int>(c.x - 9), static_cast<int>(c.y - 3), 18, 6, Color{220, 50, 60, 255});
+        DrawCircleV(c, 20.0f + 4.0f * pulse, WithAlpha(col, 0.12f + 0.08f * pulse));
+        if (health) {
+            DrawRectangleRounded(Rectangle{c.x - 13, c.y - 13, 26, 26}, 0.3f, 6, Color{235, 240, 235, 255});
+            DrawRectangle(static_cast<int>(c.x - 3), static_cast<int>(c.y - 9), 6, 18, Color{220, 50, 60, 255});
+            DrawRectangle(static_cast<int>(c.x - 9), static_cast<int>(c.y - 3), 18, 6, Color{220, 50, 60, 255});
+            continue;
+        }
+        // power-up: rotating diamond with an icon
+        float rot = t * 90.0f;
+        DrawPoly(c, 4, 16.0f, rot, Darker(col, 0.5f));
+        DrawPolyLinesEx(c, 4, 16.0f, rot, 2.0f, col);
+        switch (p.type) {
+            case gm::PICKUP_SPEED:
+                DrawTriangle(Vector2{c.x - 7, c.y - 6}, Vector2{c.x - 7, c.y + 6}, Vector2{c.x, c.y}, col);
+                DrawTriangle(Vector2{c.x, c.y - 6}, Vector2{c.x, c.y + 6}, Vector2{c.x + 7, c.y}, col);
+                break;
+            case gm::PICKUP_DAMAGE: DrawText("x2", static_cast<int>(c.x - 8), static_cast<int>(c.y - 5), 10, col); break;
+            case gm::PICKUP_SHIELD: DrawRing(c, 5.0f, 8.0f, 0, 360, 20, col); break;
+            case gm::PICKUP_GRENADE: DrawCircleV(c, 6.0f, col); break;
+        }
+        const char* label = PickupLabel(p.type);
+        DrawText(label, static_cast<int>(c.x) - MeasureText(label, 10) / 2, static_cast<int>(c.y + 22), 10, col);
+    }
+}
+
+void DrawBarrels(const gm::GameMemory& mem) {
+    for (int i = 0; i < gm::kMaxBarrels; ++i) {
+        const gm::Barrel& b = mem.barrels[i];
+        if (!b.alive) continue;
+        Vector2 c = V(b.pos);
+        float dmg = 1.0f - static_cast<float>(b.health) / 30.0f;
+        DrawCircleV(Vector2{c.x + 5, c.y + 7}, kBarrelRadius, kShadow);
+        DrawCircleV(c, kBarrelRadius, Color{120, 30, 25, 255});
+        DrawCircleV(c, kBarrelRadius - 3, Mix(Color{200, 50, 40, 255}, Color{255, 150, 60, 255}, dmg));
+        DrawRing(c, kBarrelRadius - 9, kBarrelRadius - 6, 0, 360, 24, Color{250, 210, 60, 255});  // hazard ring
+        DrawCircleV(c, 4.0f, Color{60, 20, 15, 255});
+        if (dmg > 0.3f) {  // it's about to blow: flicker
+            float f = 0.5f + 0.5f * std::sin(mem.gameTime * 30.0f);
+            DrawCircleV(c, kBarrelRadius + 3, WithAlpha(ORANGE, 0.25f * f));
+        }
+    }
+}
+
+void DrawGrenades(const gm::GameMemory& mem) {
+    for (const gm::Grenade& g : mem.grenades) {
+        if (!g.active) continue;
+        Vector2 c = V(g.pos);
+        // danger zone on the ground, more visible the closer it is to exploding
+        float danger = Clampf(1.0f - g.fuse / 1.5f, 0.0f, 1.0f);
+        float pulse = 0.5f + 0.5f * std::sin(mem.gameTime * (10.0f + 20.0f * danger));
+        DrawCircleV(c, kExplosionRadius, WithAlpha(RED, 0.05f + 0.07f * danger));
+        DrawCircleLinesV(c, kExplosionRadius, WithAlpha(RED, 0.2f + 0.4f * danger * pulse));
+        DrawCircleV(Vector2{c.x + 3, c.y + 4}, 7.0f, kShadow);
+        DrawCircleV(c, 7.0f, Color{50, 70, 40, 255});
+        DrawCircleV(c, 5.0f, Color{90, 120, 60, 255});
+        DrawCircleV(c, 2.5f, WithAlpha(RED, 0.4f + 0.6f * pulse));
     }
 }
 
@@ -210,8 +284,17 @@ void DrawCorpses(const Game& game) {
     int index = 0;
     for (const Effect& fx : game.Effects()) {
         ++index;
-        if (fx.type != EffectType::Corpse) continue;
         float fade = Clampf((fx.duration - fx.time) / 2.0f, 0.0f, 1.0f);  // fade out in the last 2 s
+        if (fx.type == EffectType::Scorch) {
+            for (int i = 0; i < 8; ++i) {
+                float a = fx.angle + 6.2831853f * i / 8.0f;
+                float d = fx.size * 0.5f * Hash01(index, i);
+                DrawCircleV(V(fx.pos + FromAngle(a) * d), fx.size * (0.4f + 0.3f * Hash01(index, i + 9)),
+                            WithAlpha(Color{10, 10, 10, 255}, 0.35f * fade));
+            }
+            continue;
+        }
+        if (fx.type != EffectType::Corpse) continue;
         Color c = fx.team == gm::TEAM_PLAYER ? kPlayerColor : kSoldierColor;
         // blood pool + body
         for (int i = 0; i < 6; ++i) {
@@ -259,6 +342,23 @@ void DrawEntity(const Game& game, const gm::GameMemory& mem, int slot) {
     // small highlight
     DrawCircleV(Vector2{pos.x - e.radius * 0.3f, pos.y - e.radius * 0.35f}, e.radius * 0.3f,
                 WithAlpha(WHITE, 0.18f * alpha));
+
+    // power-up auras
+    const gm::EntityBuffs& buff = mem.buffs[slot];
+    if (buff.shield > 0) {
+        float w = 2.0f + 4.0f * buff.shield / static_cast<float>(kMaxShield);
+        DrawRing(pos, e.radius + 3.0f, e.radius + 3.0f + w, 0, 360, 32, WithAlpha(Color{110, 140, 255, 255}, 0.8f * alpha));
+    }
+    if (buff.damageTime > 0.0f) {
+        float pulse = 0.5f + 0.5f * std::sin(mem.gameTime * 10.0f);
+        DrawCircleV(pos, e.radius + 10.0f, WithAlpha(Color{255, 80, 50, 255}, (0.12f + 0.12f * pulse) * alpha));
+    }
+    if (buff.speedTime > 0.0f && LengthSq(e.vel) > 100.0f) {
+        Vec2f back = Normalize(e.vel) * -1.0f;
+        for (int k = 1; k <= 3; ++k)
+            DrawCircleV(V(e.pos + back * (e.radius * 0.9f * k)), e.radius * (0.7f - 0.15f * k),
+                        WithAlpha(Color{80, 220, 255, 255}, 0.25f * alpha / k));
+    }
 
     // spawn protection bubble
     if (slot == static_cast<int>(mem.localPlayerIndex) && game.SpawnProtection() > 0.0f) {
@@ -331,10 +431,23 @@ void DrawEffects(const Game& game) {
             }
             case EffectType::Pickup: {
                 DrawRing(V(fx.pos), 10.0f + 40.0f * t, 14.0f + 42.0f * t, 0, 360, 36,
-                         WithAlpha(kHealthGreen, 1.0f - t));
+                         WithAlpha(PickupColor(static_cast<uint32_t>(fx.size)), 1.0f - t));
+                break;
+            }
+            case EffectType::Explosion: {
+                float r = fx.size;
+                DrawCircleV(V(fx.pos), r * (0.3f + 0.7f * t), WithAlpha(Color{255, 240, 200, 255}, 0.9f * (1.0f - t) * (1.0f - t)));
+                DrawCircleV(V(fx.pos), r * (0.2f + 0.6f * t), WithAlpha(ORANGE, 0.7f * (1.0f - t)));
+                DrawRing(V(fx.pos), r * t, r * t + 6.0f, 0, 360, 48, WithAlpha(Color{255, 200, 120, 255}, 1.0f - t));
+                for (int i = 0; i < 14; ++i) {  // debris
+                    float a = 6.2831853f * Hash01(index, i);
+                    float d = r * (0.3f + 0.9f * Hash01(index, i + 20)) * t;
+                    DrawCircleV(V(fx.pos + FromAngle(a) * d), 3.0f * (1.0f - t) + 1.0f, WithAlpha(Color{90, 80, 70, 255}, 1.0f - t));
+                }
                 break;
             }
             case EffectType::Corpse:
+            case EffectType::Scorch:
                 break;  // drawn earlier (under everything)
         }
     }
@@ -439,11 +552,11 @@ void DrawCrosshair(const Game& game, const gm::GameMemory& mem, const Camera2D& 
     }
 }
 
-void DrawWeaponBar(const Game& game) {
+void DrawWeaponBar(const Game& game, const gm::GameMemory& mem) {
     const int sw = GetScreenWidth(), sh = GetScreenHeight();
     const gm::Entity& p = game.Player();
     const int boxW = 130, boxH = 50, gap = 8;
-    const int total = gm::kWeaponCount * boxW + (gm::kWeaponCount - 1) * gap;
+    const int total = gm::kWeaponCount * boxW + gm::kWeaponCount * gap + 70;
     int x = sw / 2 - total / 2;
     const int y = sh - boxH - 14;
     char buf[64];
@@ -474,6 +587,13 @@ void DrawWeaponBar(const Game& game) {
             DrawRectangle(x + 2, y + boxH - 5, static_cast<int>((boxW - 4) * frac), 3, kAccent);
         }
     }
+    // grenades
+    int grenades = mem.buffs[mem.localPlayerIndex].grenades;
+    DrawRectangle(x, y, 70, boxH, WithAlpha(kPanel, 0.6f));
+    DrawText("G", x + 10, y + 6, 20, kTextDim);
+    for (int i = 0; i < kMaxGrenadesHeld; ++i)
+        DrawCircleV(Vector2{static_cast<float>(x + 16 + i * 18), static_cast<float>(y + 36)}, 6.0f,
+                    i < grenades ? Color{150, 200, 90, 255} : WithAlpha(kTextDim, 0.25f));
 }
 
 // Top center: timer, scores, wave, training stats.
@@ -551,6 +671,36 @@ void DrawHud(const Game& game, const gm::GameMemory& mem, const UiState& ui) {
     DrawRectangle(static_cast<int>(bar.x), static_cast<int>(bar.y + bar.height + 3),
                   static_cast<int>(bar.width * dashFrac), 5, dashFrac >= 1.0f ? SKYBLUE : WithAlpha(SKYBLUE, 0.4f));
 
+    // shield (thin blue bar above the health bar)
+    const gm::EntityBuffs& buff = mem.buffs[mem.localPlayerIndex];
+    if (buff.shield > 0) {
+        float sfrac = static_cast<float>(buff.shield) / static_cast<float>(kMaxShield);
+        DrawRectangle(static_cast<int>(bar.x), static_cast<int>(bar.y - 8), static_cast<int>(bar.width * sfrac), 5,
+                      Color{110, 140, 255, 255});
+    }
+    // active power-ups
+    {
+        int bx = 20;
+        auto tag = [&](const char* text, Color c) {
+            int w = MeasureText(text, 20) + 16;
+            DrawRectangle(bx, sh - 128, w, 24, WithAlpha(kPanel, 0.8f));
+            DrawText(text, bx + 8, sh - 126, 20, c);
+            bx += w + 6;
+        };
+        if (buff.speedTime > 0.0f) {
+            std::snprintf(buf, sizeof(buf), "SPEED %.0f", std::ceil(buff.speedTime));
+            tag(buf, Color{80, 220, 255, 255});
+        }
+        if (buff.damageTime > 0.0f) {
+            std::snprintf(buf, sizeof(buf), "x2 DMG %.0f", std::ceil(buff.damageTime));
+            tag(buf, Color{255, 90, 60, 255});
+        }
+        if (buff.shield > 0) {
+            std::snprintf(buf, sizeof(buf), "SHIELD %d", buff.shield);
+            tag(buf, Color{110, 140, 255, 255});
+        }
+    }
+
     DrawMatchInfo(game, mem);
 
     float acc = game.shotsFired > 0 ? 100.0f * game.shotsHit / game.shotsFired : 0.0f;
@@ -559,7 +709,7 @@ void DrawHud(const Game& game, const gm::GameMemory& mem, const UiState& ui) {
     std::snprintf(buf, sizeof(buf), "Kills %d   Deaths %d", p.kills, p.deaths);
     DrawTextShadow(buf, 20, sh - 74, 20, kText);
 
-    DrawWeaponBar(game);
+    DrawWeaponBar(game, mem);
 
     // Top left: status
     std::snprintf(buf, sizeof(buf), "FPS %d   Bots %d (+/-)   Zoom %.2f", GetFPS(), game.BotCount(), mem.camZoom);
@@ -614,10 +764,24 @@ void DrawHud(const Game& game, const gm::GameMemory& mem, const UiState& ui) {
         DrawRectangleGradientH(sw - sw / 5, 0, sw / 5, sh, WithAlpha(RED, 0), WithAlpha(RED, a));
     }
 
+    // Damage direction: red arcs around the player pointing to the attacker.
+    if (p.alive) {
+        Vector2 center = GetWorldToScreen2D(V(p.pos), Camera2D{Vector2{mem.camOffset.x, mem.camOffset.y},
+                                                               Vector2{mem.camTarget.x, mem.camTarget.y}, 0.0f,
+                                                               mem.camZoom});
+        for (const DamageIndicator& d : game.DamageIndicators()) {
+            float deg = d.angle * RAD2DEG;
+            float a = Clampf(1.2f - d.time, 0.0f, 1.0f);
+            DrawRing(center, 58.0f, 66.0f, deg - 22.0f, deg + 22.0f, 16, WithAlpha(RED, 0.85f * a));
+        }
+    }
+
     // Death screen
     if (!p.alive) {
         DrawRectangle(0, 0, sw, sh, Color{60, 0, 0, 90});
         DrawTextCentered("YOU DIED", sw / 2, sh / 2 - 50, 60, Color{255, 90, 90, 255});
+        if (!game.DeathRecap().empty())
+            DrawTextCentered(game.DeathRecap().c_str(), sw / 2, sh / 2 + 50, 20, kTextDim);
         if (mem.match.mode == gm::MODE_SURVIVAL)
             std::snprintf(buf, sizeof(buf), "respawning in %.1f   (%d lives left)", p.respawnTimer, mem.match.livesLeft);
         else
@@ -641,8 +805,10 @@ void DrawMinimap(const Game& game, const gm::GameMemory& mem, const Camera2D& ca
     for (int i = 0; i < gm::kMaxPickups; ++i) {
         const gm::Pickup& pk = mem.pickups[i];
         if (!pk.available) continue;
-        DrawRectangleV(Vector2{x0 + pk.pos.x * scale - 2, y0 + pk.pos.y * scale - 2}, Vector2{4, 4}, kHealthGreen);
+        DrawRectangleV(Vector2{x0 + pk.pos.x * scale - 2, y0 + pk.pos.y * scale - 2}, Vector2{4, 4}, PickupColor(pk.type));
     }
+    for (const gm::Barrel& b : mem.barrels)
+        if (b.alive) DrawCircleV(Vector2{x0 + b.pos.x * scale, y0 + b.pos.y * scale}, 2.0f, ORANGE);
     // Current view rectangle
     Vector2 tl = GetScreenToWorld2D(Vector2{0, 0}, cam);
     Vector2 br = GetScreenToWorld2D(Vector2{static_cast<float>(sw), static_cast<float>(sh)}, cam);
@@ -774,6 +940,7 @@ void DrawHelp() {
         {"1 / 2 / 3", "rifle / shotgun / sniper"},
         {"Q", "previous weapon"},
         {"Shift / Space", "dash"},
+        {"G", "throw grenade (at the cursor)"},
         {"R", "reload"},
         {"Mouse wheel", "zoom"},
         {"Tab (hold)", "scoreboard"},
@@ -788,6 +955,7 @@ void DrawHelp() {
         {"F5", "restart round"},
         {"F6", "difficulty easy / normal / hard"},
         {"F7", "fog of war on / off"},
+        {"F11", "fullscreen"},
         {"H", "close this help"},
     };
     const int n = sizeof(lines) / sizeof(lines[0]);
@@ -814,9 +982,11 @@ void DrawFrame(const Game& game, const gm::GameMemory& mem, const Camera2D& came
     DrawPickups(game, mem);
     DrawFog(mem, camera);
     DrawObstacles(mem);
+    DrawBarrels(mem);
     for (int i = gm::kMaxEntities - 1; i >= 0; --i) {  // player (slot 0) drawn last = on top
         if (IsShown(mem, i)) DrawEntity(game, mem, i);
     }
+    DrawGrenades(mem);
     DrawBullets(game);
     DrawEffects(game);
     EndMode2D();

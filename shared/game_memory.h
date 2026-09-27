@@ -42,11 +42,13 @@ namespace gm {
 // 15 characters + terminating zero = 16 bytes.
 #define GM_MAGIC_STRING "ARENA_SHOOTER!!"
 constexpr char     kMagic[16]     = GM_MAGIC_STRING;
-constexpr uint32_t kLayoutVersion = 3;
+constexpr uint32_t kLayoutVersion = 4;
 
 constexpr int kMaxEntities  = 32;  // slot 0 = local player, 1..31 = bots
 constexpr int kMaxObstacles = 32;
 constexpr int kMaxPickups   = 16;
+constexpr int kMaxGrenades  = 16;
+constexpr int kMaxBarrels   = 8;
 constexpr int kNameLength   = 16;
 
 enum Team : uint32_t {
@@ -90,7 +92,11 @@ enum MatchState : uint32_t {
 };
 
 enum PickupType : uint32_t {
-    PICKUP_HEALTH = 0,
+    PICKUP_HEALTH  = 0,  // +40% health
+    PICKUP_SPEED   = 1,  // 40% faster for 8 s
+    PICKUP_DAMAGE  = 2,  // double damage for 8 s
+    PICKUP_SHIELD  = 3,  // +50 shield (absorbs damage first)
+    PICKUP_GRENADE = 4,  // +1 grenade
 };
 
 // Bits of GameMemory::buttons (mouse buttons currently held in the game).
@@ -154,7 +160,32 @@ struct MatchInfo {
     int32_t  livesLeft;      // 0x1C  survival: lives left
 };
 
-// The global game state. Size: 0xFA0 bytes.
+// A thrown grenade. Size: 0x20 bytes.
+struct Grenade {
+    Vec2f    pos;            // 0x00  world position
+    Vec2f    vel;            // 0x08  units / second
+    float    fuse;           // 0x10  seconds until it explodes
+    uint32_t active;         // 0x14  1 = flying / lying on the ground
+    uint32_t team;           // 0x18  team of the thrower
+    int32_t  owner;          // 0x1C  entity index of the thrower
+};
+
+// Explosive barrel. Size: 0x10 bytes.
+struct Barrel {
+    Vec2f    pos;            // 0x00  world position (center, radius 20)
+    int32_t  health;         // 0x08
+    uint32_t alive;          // 0x0C  0 = exploded, respawning / unused
+};
+
+// Temporary effects per entity (same index as entities[]). Size: 0x10 bytes.
+struct EntityBuffs {
+    float    speedTime;      // 0x00  seconds of speed boost left
+    float    damageTime;     // 0x04  seconds of double damage left
+    int32_t  shield;         // 0x08  shield points (absorb damage before health)
+    int32_t  grenades;       // 0x0C  grenades carried
+};
+
+// The global game state. Size: 0x14A0 bytes.
 struct GameMemory {
     // ---- header ----------------------------------------------------------
     char     magic[16];          // 0x000  "ARENA_SHOOTER!!"
@@ -191,7 +222,11 @@ struct GameMemory {
     Obstacle obstacles[kMaxObstacles];  // 0xC80  32 * 0x10 = 0x200
     Pickup   pickups[kMaxPickups];      // 0xE80  16 * 0x10 = 0x100
     MatchInfo match;                    // 0xF80
-};                                      // 0xFA0  end
+    Grenade  grenades[kMaxGrenades];    // 0xFA0  16 * 0x20 = 0x200
+    Barrel   barrels[kMaxBarrels];      // 0x11A0  8 * 0x10 = 0x80
+    uint8_t  _reserved2[0x80];          // 0x1220
+    EntityBuffs buffs[kMaxEntities];    // 0x12A0  32 * 0x10 = 0x200
+};                                      // 0x14A0  end
 
 // ---- layout checks (compile error if anything moves) ------------------------
 static_assert(sizeof(Vec2f) == 0x08, "Vec2f size");
@@ -199,7 +234,10 @@ static_assert(sizeof(Entity) == 0x60, "Entity size");
 static_assert(sizeof(Obstacle) == 0x10, "Obstacle size");
 static_assert(sizeof(Pickup) == 0x10, "Pickup size");
 static_assert(sizeof(MatchInfo) == 0x20, "MatchInfo size");
-static_assert(sizeof(GameMemory) == 0xFA0, "GameMemory size");
+static_assert(sizeof(Grenade) == 0x20, "Grenade size");
+static_assert(sizeof(Barrel) == 0x10, "Barrel size");
+static_assert(sizeof(EntityBuffs) == 0x10, "EntityBuffs size");
+static_assert(sizeof(GameMemory) == 0x14A0, "GameMemory size");
 
 static_assert(offsetof(Entity, id) == 0x00, "");
 static_assert(offsetof(Entity, active) == 0x04, "");
@@ -248,6 +286,9 @@ static_assert(offsetof(GameMemory, entities) == 0x080, "");
 static_assert(offsetof(GameMemory, obstacles) == 0xC80, "");
 static_assert(offsetof(GameMemory, pickups) == 0xE80, "");
 static_assert(offsetof(GameMemory, match) == 0xF80, "");
+static_assert(offsetof(GameMemory, grenades) == 0xFA0, "");
+static_assert(offsetof(GameMemory, barrels) == 0x11A0, "");
+static_assert(offsetof(GameMemory, buffs) == 0x12A0, "");
 
 // ---- helpers ------------------------------------------------------------------
 

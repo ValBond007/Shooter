@@ -119,6 +119,9 @@ std::string DescribeMemoryLayout() {
     GM_FIELD(obstacles, "Obst.[32]");
     GM_FIELD(pickups, "Pick.[16]");
     GM_FIELD(match, "MatchInfo");
+    GM_FIELD(grenades, "Gren.[16]");
+    GM_FIELD(barrels, "Barr.[8]");
+    GM_FIELD(buffs, "Buffs[32]");
 #undef GM_FIELD
     add("");
     add("Entity fields (offset from entities[i]):");
@@ -151,6 +154,12 @@ std::string DescribeMemoryLayout() {
     add("match               = g_game + 0x%zX  (mode u32, state u32, timeLeft f32, map u32,",
         offsetof(gm::GameMemory, match));
     add("                        teamScore i32[2], wave u32, livesLeft i32)");
+    add("grenades[i]         = g_game + 0x%zX + i * 0x%zX  (pos, vel, fuse f32, active u32, team u32, owner i32)",
+        offsetof(gm::GameMemory, grenades), sizeof(gm::Grenade));
+    add("barrels[i]          = g_game + 0x%zX + i * 0x%zX  (pos, health i32, alive u32)",
+        offsetof(gm::GameMemory, barrels), sizeof(gm::Barrel));
+    add("buffs[i]            = g_game + 0x%zX + i * 0x%zX  (speedTime f32, damageTime f32, shield i32, grenades i32)",
+        offsetof(gm::GameMemory, buffs), sizeof(gm::EntityBuffs));
     add("world -> screen     : screen = (world - camTarget) * camZoom + camOffset");
     add("===================================================================");
     return out;

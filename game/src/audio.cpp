@@ -148,6 +148,23 @@ bool Audio::Init() {
     });
     src[SND_CLICK] = Synthesize(0.04f, [](float t) { return 0.4f * std::sin(kTwoPi * 900 * t) * Env(t, 90); });
 
+    {
+        Noise n1, n2;
+        src[SND_EXPLOSION] = Synthesize(1.3f, [&](float t) {
+            float boom = std::sin(kTwoPi * (45.0f + 60.0f * Env(t, 8)) * t) * Env(t, 4);
+            return 0.8f * n1.Next(0.15f) * Env(t, 3.5f) + 0.6f * boom + 0.4f * n2.Next(0.9f) * Env(t, 40);
+        });
+    }
+    {
+        Noise n;
+        src[SND_THROW] = Synthesize(0.18f, [&](float t) { return 0.4f * n.Next(0.3f) * std::sin(3.14159f * t / 0.18f); });
+    }
+    src[SND_POWERUP] = Synthesize(0.4f, [](float t) {
+        const float notes[4] = {660.0f, 880.0f, 1100.0f, 1320.0f};
+        int i = std::min(3, static_cast<int>(t / 0.08f));
+        return 0.3f * std::sin(kTwoPi * notes[i] * t) * Env(t, 4);
+    });
+
     for (int s = 0; s < SND_COUNT; ++s)
         for (int v = 0; v < kVoices; ++v) voices_->alias[s][v] = LoadSoundAlias(src[s]);
     ready_ = true;
@@ -194,6 +211,9 @@ void Audio::PlayEvents(const std::vector<GameEvent>& events, Vec2f listener) {
             case GameEventType::Dash:           Play(SND_DASH, 0.5f, jitter); break;
             case GameEventType::WaveStart:      Play(SND_WAVE, 0.6f); break;
             case GameEventType::MatchEnd:       Play(SND_MATCH_END, 0.6f); break;
+            case GameEventType::Explosion:      Play(SND_EXPLOSION, 0.8f * std::max(att, 0.15f), jitter); break;
+            case GameEventType::GrenadeThrow:   Play(SND_THROW, 0.4f * att); break;
+            case GameEventType::PowerUp:        Play(SND_POWERUP, 0.6f); break;
         }
     }
 }

@@ -168,6 +168,17 @@ const char* WeaponText(uint32_t w) {
     }
 }
 
+const char* PickupText(uint32_t t) {
+    switch (t) {
+        case gm::PICKUP_HEALTH:  return "health";
+        case gm::PICKUP_SPEED:   return "speed";
+        case gm::PICKUP_DAMAGE:  return "damage";
+        case gm::PICKUP_SHIELD:  return "shield";
+        case gm::PICKUP_GRENADE: return "grenade";
+        default:                 return "?";
+    }
+}
+
 const char* ModeText(uint32_t m) {
     switch (m) {
         case gm::MODE_DEATHMATCH:      return "deathmatch";
@@ -271,13 +282,22 @@ int RunDump(MemoryReader& mem, GameReader& reader, const Config& cfg, const Args
                         i, EntityName(e).c_str(), e.team, KindText(e.kind), e.alive, e.health, e.pos.x, e.pos.y, e.vel.x,
                         e.vel.y, e.visible, WeaponText(e.weapon), ammo, e.kills, e.deaths, s.x, s.y);
         }
-        std::printf("\x1b[K\nhealth packs:");
+        std::printf("\x1b[K\npickups:");
         for (int i = 0; i < gm::kMaxPickups; ++i) {
             const gm::Pickup& p = g.pickups[i];
             if (p.pos.x == 0.0f && p.pos.y == 0.0f) continue;
-            std::printf("  (%.0f,%.0f)%s", p.pos.x, p.pos.y, p.available ? "" : "x");
+            std::printf("  %s(%.0f,%.0f)%s", PickupText(p.type), p.pos.x, p.pos.y, p.available ? "" : "x");
         }
-        std::printf("\x1b[K\n");
+        std::printf("\x1b[K\nbarrels:");
+        for (const gm::Barrel& b : g.barrels)
+            if (b.pos.x != 0.0f || b.pos.y != 0.0f)
+                std::printf("  (%.0f,%.0f)%s", b.pos.x, b.pos.y, b.alive ? "" : "x");
+        std::printf("\x1b[K\ngrenades:");
+        for (const gm::Grenade& gr : g.grenades)
+            if (gr.active) std::printf("  (%.0f,%.0f) fuse %.1f team %u", gr.pos.x, gr.pos.y, gr.fuse, gr.team);
+        const gm::EntityBuffs& my = g.buffs[g.localPlayerIndex % gm::kMaxEntities];
+        std::printf("\x1b[K\nyour buffs: speed %.1f s  damage %.1f s  shield %d  grenades %d\x1b[K\n", my.speedTime,
+                    my.damageTime, my.shield, my.grenades);
         std::printf("\x1b[J");  // clear the rest of the screen
         std::fflush(stdout);
     }
@@ -316,7 +336,19 @@ int RunRadar(MemoryReader& mem, GameReader& reader, const Config& cfg, const Arg
             if (!p.available) continue;
             int x, y;
             cell(p.pos.x, p.pos.y, x, y);
-            grid[y][x] = '+';
+            grid[y][x] = p.type == gm::PICKUP_HEALTH ? '+' : '*';
+        }
+        for (const gm::Barrel& b : g.barrels) {
+            if (!b.alive) continue;
+            int x, y;
+            cell(b.pos.x, b.pos.y, x, y);
+            grid[y][x] = 'B';
+        }
+        for (const gm::Grenade& gr : g.grenades) {
+            if (!gr.active) continue;
+            int x, y;
+            cell(gr.pos.x, gr.pos.y, x, y);
+            grid[y][x] = 'o';
         }
         const gm::Entity& me = g.entities[g.localPlayerIndex % gm::kMaxEntities];
         for (int i = 0; i < gm::kMaxEntities; ++i) {
@@ -330,7 +362,7 @@ int RunRadar(MemoryReader& mem, GameReader& reader, const Config& cfg, const Arg
         }
 
         CursorHome();
-        std::printf("Arena Shooter - radar (from memory)   @ you  A ally  E enemy (visible)  e enemy (hidden)  + health  # wall\x1b[K\n");
+        std::printf("Arena Shooter - radar (from memory)   @ you  A ally  E/e enemy (seen/hidden)  + health  * power-up  B barrel  o grenade  # wall\x1b[K\n");
         std::printf("+%s+\n", std::string(W, '-').c_str());
         for (const std::string& row : grid) std::printf("|%s|\n", row.c_str());
         std::printf("+%s+\n", std::string(W, '-').c_str());
@@ -371,7 +403,7 @@ int RunBench(MemoryReader& mem, GameReader& reader, const Config& cfg) {
     std::printf("\nmemory backend: %s\n\n", mem.Name());
     bench("8 bytes (one value)", 8, 2000);
     bench("0x60 bytes (one entity)", sizeof(gm::Entity), 2000);
-    bench("0xFA0 bytes (whole game)", sizeof(gm::GameMemory), 2000);
+    bench("0x14A0 bytes (whole game)", sizeof(gm::GameMemory), 2000);
     std::printf("\nReading the whole struct at once is much cheaper than reading every\n"
                 "field separately (%zu single reads would be needed for all entities).\n",
                 static_cast<size_t>(gm::kMaxEntities) * 15);

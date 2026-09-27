@@ -66,6 +66,7 @@ difficulty and fog of war (mouse or arrow keys + Enter).
 
 Maps: **Arena** (mixed cover), **Warehouse** (shelves and crates), **Corridors** (long lanes).
 
+The game remembers your last menu choices and the mute setting in `shooter_settings.ini`.
 Every finished match adds one line to **`shooter_results.csv`** (see
 [measuring the aimbot](#measuring-the-aimbot)).
 
@@ -75,6 +76,7 @@ Every finished match adds one line to **`shooter_results.csv`** (see
 | mouse | aim (the crosshair is the Windows cursor) |
 | left mouse | shoot |
 | `Shift` / `Space` | dash (short burst of speed, 1.2 s cooldown) |
+| `G` | throw a grenade at the cursor |
 | `1` / `2` / `3` | rifle / shotgun / sniper |
 | `Q` | previous weapon |
 | `R` | reload |
@@ -91,6 +93,7 @@ Every finished match adds one line to **`shooter_results.csv`** (see
 | F5 | restart match |
 | F6 | difficulty: easy / normal / hard |
 | F7 | fog of war on / off |
+| F11 | fullscreen (borderless) |
 
 Command line:
 ```
@@ -115,6 +118,15 @@ shooter.exe --mode dm|tdm|survival|training --map 0|1|2 --bots 12
   (slow, big, 220 HP, shotgun). Bots strafe, change direction often, dash when
   you aim at them, back off while reloading and go for health packs when hurt.
 - **Health packs** (+40 HP, back after 20 s).
+- **Power-ups** (rotating diamonds, random type, back after 30 s): *speed* (+40 % for 8 s),
+  *double damage* (8 s), *shield* (absorbs 50 damage), *grenade* (+1).
+- **Grenades**: you start with 2 (max 3). They bounce off walls and explode after 1.5 s;
+  a red circle on the ground shows the blast radius. Walls block the blast. Soldiers and
+  Heavies throw grenades at you when you hide behind cover.
+- **Explosive barrels**: shoot them (30 HP) or blow them up with a grenade. They chain-react
+  and come back after 25 s.
+- Red arcs around you show where damage comes from; the death screen tells you who killed
+  you and with what.
 - **Fog of war**: walls cast shadows and enemies you can't see aren't drawn.
   They are still in memory, so `aimbot radar` / `aimbot dump` show them. This is a
   nice demo of what reading memory gives you.
@@ -138,7 +150,7 @@ Game facts that matter for the aimbot:
 Everything is in **one global struct** in the game's `.data` section:
 
 ```cpp
-gm::GameMemory g_game;   // shared/game_memory.h, size 0xFA0
+gm::GameMemory g_game;   // shared/game_memory.h, size 0x14A0
 ```
 
 ```
@@ -153,6 +165,9 @@ g_game + 0x080  entities[32]   (0x60 bytes each, [0] = you)
 g_game + 0xC80  obstacles[32]  (walls)
 g_game + 0xE80  pickups[16]    (health packs)
 g_game + 0xF80  match          (mode, state, time left, team scores, wave, lives)
+g_game + 0xFA0  grenades[16]   (pos, vel, fuse, team, owner)
+g_game + 0x11A0 barrels[8]     (pos, health, alive)
+g_game + 0x12A0 buffs[32]      (per entity: speed / damage time, shield, grenades)
 ```
 
 Two ways to find it:

@@ -39,8 +39,39 @@ struct Options {
     float    seconds = 0.0f;  // headless: 0 = run forever
 };
 
+// ---- remembered settings (shooter_settings.ini) ------------------------------------------
+constexpr const char* kSettingsFile = "shooter_settings.ini";
+
+void LoadSettings(Options& o, bool& muted) {
+    FILE* f = std::fopen(kSettingsFile, "r");
+    if (!f) return;
+    char key[64];
+    int value = 0;
+    while (std::fscanf(f, " %63[^=]=%d", key, &value) == 2) {
+        std::string k = key;
+        if (k == "mode") o.match.mode = static_cast<uint32_t>(std::clamp(value, 0, 3));
+        else if (k == "map") o.match.map = value;
+        else if (k == "bots") o.match.bots = std::clamp(value, 1, gm::kMaxEntities - 1);
+        else if (k == "difficulty") o.match.difficulty = static_cast<uint32_t>(std::clamp(value, 0, 2));
+        else if (k == "fog") o.fog = value != 0;
+        else if (k == "muted") muted = value != 0;
+    }
+    std::fclose(f);
+}
+
+void SaveSettings(const MatchSettings& m, bool fog, bool muted) {
+    FILE* f = std::fopen(kSettingsFile, "w");
+    if (!f) return;
+    std::fprintf(f, "mode=%u\nmap=%d\nbots=%d\ndifficulty=%u\nfog=%d\nmuted=%d\n", m.mode, m.map, m.bots,
+                 m.difficulty, fog ? 1 : 0, muted ? 1 : 0);
+    std::fclose(f);
+}
+
+bool g_startMuted = false;
+
 Options ParseArgs(int argc, char** argv) {
     Options o;
+    LoadSettings(o, g_startMuted);  // command line arguments below override these
     o.seed = static_cast<uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count());
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -151,6 +182,7 @@ int RunHeadless(const Options& opt) {
         }
         in.shoot = best < 700.0f;
         in.reload = p.ammo == 0;
+        in.throwGrenade = best < 600.0f && std::fmod(t, 5.0f) < Game::kTickDt;
         game.Tick(in);
         if (game.MatchOver()) {
             std::printf("[headless] %s: %s\n", game.Result().title.c_str(), game.Result().csvLine.c_str());
@@ -216,6 +248,7 @@ int main(int argc, char** argv) {
     Game game(g_game, opt.seed);
     Audio audio;
     if (!audio.Init()) std::printf("[audio] no audio device - running without sound\n");
+    audio.muted = g_startMuted;
 
     MenuState menu;
     menu.settings = opt.match;
@@ -224,6 +257,7 @@ int main(int argc, char** argv) {
 
     Screen screen = Screen::Menu;
     UiState ui;
+    ui.muted = g_startMuted;
     Camera2D cam{};
     cam.zoom = 1.0f;
     float accumulator = 0.0f;
@@ -233,11 +267,13 @@ int main(int argc, char** argv) {
     int   pendingWeapon = -1;     // one-shot inputs wait for the next simulation tick
     bool  pendingReload = false;
     bool  pendingDash = false;
+    bool  pendingGrenade = false;
     int   previousWeapon = gm::WEAPON_SHOTGUN;
     int   menuMap = -1;
     bool  quit = false;
 
     auto startMatch = [&]() {
+        SaveSettings(menu.settings, menu.fog, ui.muted);
         game.StartMatch(menu.settings);
         g_game.fogOfWar = menu.fog ? 1u : 0u;
         cam.zoom = 1.0f;
@@ -266,6 +302,7 @@ int main(int argc, char** argv) {
         if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))  buttons |= gm::BUTTON_RIGHT;
         if (IsMouseButtonDown(MOUSE_BUTTON_MIDDLE)) buttons |= gm::BUTTON_MIDDLE;
         if (IsKeyPressed(KEY_M)) audio.muted = ui.muted = !ui.muted;
+        if (IsKeyPressed(KEY_F11)) ToggleBorderlessWindowed();
 
         // =====================================================================
         //  Main menu
@@ -315,6 +352,7 @@ int main(int argc, char** argv) {
                 if (wheel != 0.0f) cam.zoom = Clampf(cam.zoom * (1.0f + 0.1f * wheel), 0.5f, 1.6f);
                 if (IsKeyPressed(KEY_R)) pendingReload = true;
                 if (IsKeyPressed(KEY_LEFT_SHIFT) || IsKeyPressed(KEY_SPACE)) pendingDash = true;
+                if (IsKeyPressed(KEY_G)) pendingGrenade = true;
                 int current = static_cast<int>(game.Player().weapon);
                 for (int w = 0; w < gm::kWeaponCount; ++w)
                     if (IsKeyPressed(static_cast<KeyboardKey>(KEY_ONE + w)) && w != current) pendingWeapon = w;
@@ -340,6 +378,7 @@ int main(int argc, char** argv) {
         in.reload = pendingReload;
         in.selectWeapon = pendingWeapon;
         in.dash = pendingDash;
+        in.throwGrenade = pendingGrenade;
 
         // ---- simulation (fixed time step) ------------------------------------------
         if (!ui.paused && !ui.showHelp) {
@@ -351,6 +390,7 @@ int main(int argc, char** argv) {
                 in.reload = pendingReload = false;
                 in.selectWeapon = pendingWeapon = -1;
                 in.dash = pendingDash = false;
+                in.throwGrenade = pendingGrenade = false;
             }
         }
 
@@ -361,6 +401,10 @@ int main(int argc, char** argv) {
             if (e.type == GameEventType::PlayerShot) shake = std::max(shake, GetWeaponDef(e.weapon).shake);
             if (e.type == GameEventType::PlayerHurt) shake = std::max(shake, 5.0f);
             if (e.type == GameEventType::PlayerDied) shake = std::max(shake, 10.0f);
+            if (e.type == GameEventType::Explosion) {
+                float d = Distance(e.pos, game.Player().pos);
+                shake = std::max(shake, 14.0f * Clampf(1.0f - d / 900.0f, 0.0f, 1.0f));
+            }
             if (e.type == GameEventType::MatchEnd) {
                 AppendResultCsv(game.Result().csvLine);
                 std::printf("[match] %s  %s\n", game.Result().title.c_str(), game.Result().csvLine.c_str());
@@ -404,6 +448,7 @@ int main(int argc, char** argv) {
         }
     }
 
+    SaveSettings(menu.settings, menu.fog, ui.muted);
     ShutdownRenderer();
     CloseWindow();
     return 0;

@@ -56,7 +56,7 @@ Consequences you can measure with `aimbot bench`:
 - Each read is a **round trip** over USB + PCIe, so latency is much higher than a local
   `ReadProcessMemory`.
 - Reading 8 bytes costs about as much as reading 4 KiB, so **few big reads beat many
-  small ones**. That is why the aimbot reads the whole `GameMemory` (0xFA0 bytes) in
+  small ones**. That is why the aimbot reads the whole `GameMemory` (0x14A0 bytes) in
   one go instead of reading each field.
 - Memory can change while it is being read (the game writes, we read), so a snapshot
   can mix two frames. For an aimbot that's fine; `frameCount` shows how fresh the
