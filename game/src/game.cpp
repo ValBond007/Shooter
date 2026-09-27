@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
+
+#include "maps.h"
 
 namespace {
 
@@ -30,6 +33,19 @@ constexpr float kBulletRadius = 3.0f;
 constexpr int   kHealthPackAmount  = 40;
 constexpr float kHealthPackRespawn = 20.0f;
 constexpr float kPickupRadius      = 16.0f;
+
+// ---- player dash ---------------------------------------------------------------------
+constexpr float kDashTime  = 0.16f;
+constexpr float kDashSpeed = 850.0f;
+
+// ---- match rules -------------------------------------------------------------------------
+constexpr float kMatchTime        = 300.0f;  // deathmatch / team deathmatch: 5 minutes
+constexpr int   kDmKillLimit      = 25;
+constexpr int   kTdmScoreLimit    = 50;
+constexpr float kTrainingTime     = 60.0f;
+constexpr int   kSurvivalLives    = 3;
+constexpr float kWaveBreakTime    = 4.0f;
+constexpr float kTrainingRespawn  = 0.35f;  // pause between training targets
 
 // ---- player weapons (index = gm::WeaponId) ------------------------------------------
 //                          name       delay  speed  dmg pel spread  mag reload life  shake
@@ -163,12 +179,30 @@ const char* KindName(uint32_t kind) {
     }
 }
 
+const char* ModeName(uint32_t mode) {
+    switch (mode) {
+        case gm::MODE_DEATHMATCH:      return "Deathmatch";
+        case gm::MODE_TEAM_DEATHMATCH: return "Team Deathmatch";
+        case gm::MODE_SURVIVAL:        return "Survival";
+        case gm::MODE_TRAINING:        return "Aim Training";
+        default:                       return "?";
+    }
+}
+
+const char* ModeDescription(uint32_t mode) {
+    switch (mode) {
+        case gm::MODE_DEATHMATCH:      return "Everyone is your enemy. First to 25 kills, 5 minutes.";
+        case gm::MODE_TEAM_DEATHMATCH: return "You + allied bots vs enemy bots. First team to 50 kills.";
+        case gm::MODE_SURVIVAL:        return "Endless waves that get harder. 3 lives, no enemy respawns.";
+        case gm::MODE_TRAINING:        return "60 s, one moving target at a time. Measures accuracy, reaction and time to kill.";
+        default:                       return "";
+    }
+}
+
 // =============================================================================
 
 Game::Game(gm::GameMemory& mem, uint32_t seed) : mem_(mem), rng_(seed) {
-    mem_.difficulty = gm::DIFFICULTY_NORMAL;
-    BuildArena();
-    Reset();
+    StartMatch(MatchSettings{});
 }
 
 float Game::RandF(float lo, float hi) {
@@ -185,43 +219,59 @@ std::vector<GameEvent> Game::TakeEvents() {
     return out;
 }
 
-void Game::SetDifficulty(uint32_t d) { mem_.difficulty = d > gm::DIFFICULTY_HARD ? gm::DIFFICULTY_NORMAL : d; }
+void Game::SetDifficulty(uint32_t d) {
+    mem_.difficulty = d > gm::DIFFICULTY_HARD ? gm::DIFFICULTY_NORMAL : d;
+    settings_.difficulty = mem_.difficulty;
+}
 
-void Game::BuildArena() {
+int Game::KillLimit() const {
+    switch (settings_.mode) {
+        case gm::MODE_DEATHMATCH:      return kDmKillLimit;
+        case gm::MODE_TEAM_DEATHMATCH: return kTdmScoreLimit;
+        default:                       return 0;
+    }
+}
+
+void Game::BuildArena(int map) {
+    const MapDef& def = GetMap(map);
     mem_.arenaSize = {kArenaW, kArenaH};
-    const gm::Obstacle layout[] = {
-        {1100, 700, 200, 200},                                             // center block
-        {500, 350, 260, 50},   {1640, 350, 260, 50},                       // long covers
-        {500, 1200, 260, 50},  {1640, 1200, 260, 50},
-        {400, 600, 50, 400},   {1950, 600, 50, 400},                       // side walls
-        {850, 250, 80, 80},    {1470, 250, 80, 80},                        // crates
-        {850, 1270, 80, 80},   {1470, 1270, 80, 80},
-        {1100, 300, 200, 40},  {1100, 1260, 200, 40},                      // mid bars
-        {150, 150, 120, 120},  {2130, 150, 120, 120},                      // corners
-        {150, 1330, 120, 120}, {2130, 1330, 120, 120},
-        {750, 760, 60, 80},    {1590, 760, 60, 80},                        // small crates
-    };
     mem_.obstacleCount = 0;
-    for (const auto& o : layout) {
+    for (const auto& o : def.walls) {
         if (mem_.obstacleCount >= static_cast<uint32_t>(gm::kMaxObstacles)) break;
         mem_.obstacles[mem_.obstacleCount++] = o;
     }
+    std::memset(mem_.obstacles + mem_.obstacleCount, 0,
+                sizeof(gm::Obstacle) * (gm::kMaxObstacles - mem_.obstacleCount));
 
-    // Health packs at fixed spots.
-    const Vec2f packs[] = {
-        {1200, 200}, {1200, 1400}, {300, 800}, {2100, 800}, {640, 640}, {1760, 960},
-    };
     std::memset(mem_.pickups, 0, sizeof(mem_.pickups));
     int i = 0;
-    for (Vec2f p : packs) {
+    for (Vec2f p : def.healthPacks) {
+        if (i >= gm::kMaxPickups) break;
         mem_.pickups[i].pos = p;
         mem_.pickups[i].type = gm::PICKUP_HEALTH;
         mem_.pickups[i].available = 1;
+        pickupTimers_[i] = 0.0f;
         ++i;
     }
 }
 
-void Game::Reset() {
+// Which team does entity slot `slot` play for in the current mode?
+static uint32_t TeamForSlot(uint32_t mode, int slot, int bots) {
+    if (slot == 0) return gm::TEAM_PLAYER;
+    if (mode == gm::MODE_TEAM_DEATHMATCH) {
+        int allies = (bots - 1) / 2;  // e.g. 8 bots -> 3 allies: you + 3 vs 5
+        return slot <= allies ? gm::TEAM_PLAYER : gm::TEAM_BOTS;
+    }
+    return gm::TEAM_BOTS;
+}
+
+void Game::StartMatch(const MatchSettings& settings) {
+    settings_ = settings;
+    settings_.map = std::max(0, std::min(settings_.map, MapCount() - 1));
+    settings_.bots = std::max(0, std::min(settings_.bots, gm::kMaxEntities - 1));
+    mem_.difficulty = settings_.difficulty <= gm::DIFFICULTY_HARD ? settings_.difficulty : gm::DIFFICULTY_NORMAL;
+    BuildArena(settings_.map);
+
     bullets_.clear();
     effects_.clear();
     texts_.clear();
@@ -230,46 +280,92 @@ void Game::Reset() {
     shotsFired = shotsHit = 0;
     killStreak_ = multiKill_ = 0;
     announcement_ = Announcement{};
+    training_ = TrainingStats{};
+    result_ = MatchResult{};
+    matchTime_ = 0.0f;
+    waveBreak_ = 0.0f;
+    dashTimer_ = dashCooldown_ = 0.0f;
 
+    std::memset(&mem_.match, 0, sizeof(mem_.match));
+    mem_.match.mode  = settings_.mode;
+    mem_.match.map   = static_cast<uint32_t>(settings_.map);
+    mem_.match.state = gm::MATCH_PLAYING;
     mem_.localPlayerIndex = 0;
-
-    for (int i = 0; i < gm::kMaxPickups; ++i) {
-        pickupTimers_[i] = 0.0f;
-        if (mem_.pickups[i].pos.x != 0.0f || mem_.pickups[i].pos.y != 0.0f) mem_.pickups[i].available = 1;
-    }
 
     for (int i = 0; i < gm::kMaxEntities; ++i) {
         gm::Entity& e = mem_.entities[i];
         std::memset(&e, 0, sizeof(e));
-        e.team = (i == 0) ? gm::TEAM_PLAYER : gm::TEAM_BOTS;
+        e.team = TeamForSlot(settings_.mode, i, settings_.bots);
         const char* name = (i == 0) ? "You" : kBotNames[i - 1];
         std::snprintf(e.name, sizeof(e.name), "%s", name);
     }
 
-    // Player first, then bots (bots spawn far away from the player).
+    // The player first, then bots (they spawn away from their enemies).
     gm::Entity& p = mem_.entities[0];
     p.active = 1;
     p.kind = gm::KIND_PLAYER;
     p.weapon = gm::WEAPON_RIFLE;
-    for (int w = 0; w < gm::kWeaponCount; ++w) playerAmmo_[w] = kWeapons[w].magSize;
     SpawnEntity(0);
-    SetBotCount(botCount_);
+    botCount_ = 0;
+
+    switch (settings_.mode) {
+        case gm::MODE_DEATHMATCH:
+        case gm::MODE_TEAM_DEATHMATCH:
+            mem_.match.timeLeft = kMatchTime;
+            SetBotCount(settings_.bots);
+            break;
+        case gm::MODE_SURVIVAL:
+            mem_.match.livesLeft = kSurvivalLives;
+            mem_.match.wave = 0;
+            waveBreak_ = 2.5f;  // first wave after a short delay
+            mem_.entityCount = 1;
+            break;
+        case gm::MODE_TRAINING:
+            mem_.match.timeLeft = kTrainingTime;
+            training_.nextSpawn = 1.0f;
+            mem_.entityCount = 2;
+            break;
+    }
+}
+
+void Game::EnterMenu(int map) {
+    BuildArena(std::max(0, std::min(map, MapCount() - 1)));
+    bullets_.clear();
+    effects_.clear();
+    texts_.clear();
+    killFeed_.clear();
+    events_.clear();
+    for (int i = 0; i < gm::kMaxEntities; ++i) {
+        mem_.entities[i].active = 0;
+        mem_.entities[i].alive = 0;
+    }
+    mem_.entityCount = 0;
+    std::memset(&mem_.match, 0, sizeof(mem_.match));
+    mem_.match.state = gm::MATCH_MENU;
+    mem_.match.map = static_cast<uint32_t>(map);
 }
 
 void Game::SetBotCount(int count) {
+    // Only deathmatch modes let you change the bot count during the match.
+    if (settings_.mode != gm::MODE_DEATHMATCH && settings_.mode != gm::MODE_TEAM_DEATHMATCH) return;
     count = std::max(0, std::min(count, gm::kMaxEntities - 1));
     botCount_ = count;
+    settings_.bots = count;
     for (int i = 1; i < gm::kMaxEntities; ++i) {
         gm::Entity& e = mem_.entities[i];
         bool shouldBeActive = i <= count;
+        uint32_t team = TeamForSlot(settings_.mode, i, count);
         if (shouldBeActive && !e.active) {
             e.active = 1;
+            e.team = team;
             e.kills = e.deaths = 0;
             SpawnEntity(i);
         } else if (!shouldBeActive && e.active) {
             e.active = 0;
             e.alive = 0;
             e.health = 0;
+        } else if (shouldBeActive) {
+            e.team = team;  // team sizes may change with the bot count
         }
     }
     mem_.entityCount = static_cast<uint32_t>(count + 1);
@@ -286,7 +382,8 @@ bool Game::CircleHitsObstacle(Vec2f pos, float radius) const {
     return false;
 }
 
-Vec2f Game::FindSpawnPoint(bool farFromPlayer) {
+// A free spot far away from the enemies of `team`.
+Vec2f Game::FindSpawnPoint(uint32_t team) {
     const float margin = 60.0f;
     Vec2f best{kArenaW * 0.5f, kArenaH * 0.25f};
     float bestScore = -1.0f;
@@ -294,15 +391,13 @@ Vec2f Game::FindSpawnPoint(bool farFromPlayer) {
         Vec2f p{RandF(margin, kArenaW - margin), RandF(margin, kArenaH - margin)};
         if (CircleHitsObstacle(p, 40.0f)) continue;
 
-        // Score = distance to the nearest enemy of whoever spawns here.
         float nearest = 1e9f;
         for (int i = 0; i < gm::kMaxEntities; ++i) {
             const gm::Entity& e = mem_.entities[i];
-            if (!e.active || !e.alive) continue;
-            bool relevant = farFromPlayer ? (i == 0) : (i != 0);
-            if (relevant) nearest = std::min(nearest, Distance(p, e.pos));
+            if (!e.active || !e.alive || e.team == team) continue;
+            nearest = std::min(nearest, Distance(p, e.pos));
         }
-        if (nearest > 600.0f) return p;
+        if (nearest > 650.0f) return p;
         if (nearest > bestScore) {
             bestScore = nearest;
             best = p;
@@ -311,13 +406,26 @@ Vec2f Game::FindSpawnPoint(bool farFromPlayer) {
     return best;
 }
 
+// Training targets spawn where you can see them: on screen, with line of sight.
+Vec2f Game::FindTrainingSpawn() {
+    const gm::Entity& p = Player();
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        float a = RandF(-kPi, kPi);
+        float d = RandF(300.0f, 650.0f);
+        Vec2f pos = p.pos + Vec2f{std::cos(a) * d, std::sin(a) * d * 0.6f};
+        if (pos.x < 60 || pos.y < 60 || pos.x > kArenaW - 60 || pos.y > kArenaH - 60) continue;
+        if (CircleHitsObstacle(pos, 30.0f) || !LineOfSight(p.pos, pos)) continue;
+        return pos;
+    }
+    return FindSpawnPoint(gm::TEAM_BOTS);
+}
+
 void Game::SpawnEntity(int slot) {
     gm::Entity& e = mem_.entities[slot];
     bool isPlayer = slot == static_cast<int>(mem_.localPlayerIndex);
 
     e.id           = nextId_++;
     e.alive        = 1;
-    e.pos          = FindSpawnPoint(!isPlayer);
     e.vel          = {0, 0};
     e.aimAngle     = RandF(-kPi, kPi);
     e.respawnTimer = 0.0f;
@@ -326,6 +434,7 @@ void Game::SpawnEntity(int slot) {
     hitFlash_[slot] = 0.0f;
 
     if (isPlayer) {
+        e.pos       = FindSpawnPoint(e.team);
         e.kind      = gm::KIND_PLAYER;
         e.maxHealth = kPlayerMaxHealth;
         e.radius    = kPlayerRadius;
@@ -336,14 +445,22 @@ void Game::SpawnEntity(int slot) {
         killStreak_ = 0;
         Emit(GameEventType::Respawn, e.pos);
     } else {
-        // Pick a bot type: 60% soldier, 25% runner, 15% heavy.
+        // Pick a bot type. Survival gets more heavies in later waves,
+        // training only uses targets that move a lot.
         float r = RandF(0, 1);
-        e.kind = r < 0.60f ? gm::KIND_SOLDIER : (r < 0.85f ? gm::KIND_RUNNER : gm::KIND_HEAVY);
+        if (settings_.mode == gm::MODE_TRAINING) {
+            e.kind = r < 0.6f ? gm::KIND_SOLDIER : gm::KIND_RUNNER;
+        } else {
+            float heavy = 0.15f;
+            if (settings_.mode == gm::MODE_SURVIVAL) heavy = std::min(0.05f + 0.03f * mem_.match.wave, 0.35f);
+            e.kind = r < heavy ? gm::KIND_HEAVY : (r < heavy + 0.25f ? gm::KIND_RUNNER : gm::KIND_SOLDIER);
+        }
         const BotKindDef& k = kBotKinds[e.kind];
-        e.maxHealth = k.health;
+        e.maxHealth = settings_.mode == gm::MODE_TRAINING ? 100 : k.health;  // same health = fair timing
         e.radius    = k.radius;
         e.weapon    = k.weapon;
         e.ammo      = k.magSize;
+        e.pos       = settings_.mode == gm::MODE_TRAINING ? FindTrainingSpawn() : FindSpawnPoint(e.team);
 
         BotBrain& b = brains_[slot];
         b = BotBrain{};
@@ -351,7 +468,7 @@ void Game::SpawnEntity(int slot) {
         b.strafeDir     = RandF(0, 1) < 0.5f ? -1.0f : 1.0f;
         b.preferredDist = RandF(k.distMin, k.distMax);
         b.fireCooldown  = RandF(0.5f, 1.2f);
-        b.wanderTarget  = FindSpawnPoint(false);
+        b.wanderTarget  = FindSpawnPoint(e.team);
     }
     e.health = e.maxHealth;
 }
@@ -424,7 +541,12 @@ int Game::NearestPickup(Vec2f from, float maxDist) const {
 
 void Game::Tick(const PlayerInput& input) {
     const float dt = kTickDt;
+    if (mem_.match.state != gm::MATCH_PLAYING) {
+        UpdateEffects(dt);  // let particles finish on the result screen
+        return;
+    }
     mem_.gameTime += dt;
+    matchTime_ += dt;
 
     UpdatePlayer(input, dt);
     for (int i = 1; i < gm::kMaxEntities; ++i) {
@@ -436,6 +558,7 @@ void Game::Tick(const PlayerInput& input) {
     UpdateRespawns(dt);
     UpdateEffects(dt);
     UpdateVisibility();
+    UpdateMatch(dt);
 
     hitMarker_       = std::max(0.0f, hitMarker_ - dt);
     damageFlash_     = std::max(0.0f, damageFlash_ - dt);
@@ -454,9 +577,193 @@ void Game::UpdateVisibility() {
     }
 }
 
+// -----------------------------------------------------------------------------
+//  Match rules
+// -----------------------------------------------------------------------------
+
+void Game::StartWave(int wave) {
+    mem_.match.wave = static_cast<uint32_t>(wave);
+    int count = std::min(2 + 2 * wave, gm::kMaxEntities - 1);
+    botCount_ = count;
+    for (int i = 1; i < gm::kMaxEntities; ++i) {
+        gm::Entity& e = mem_.entities[i];
+        e.active = i <= count ? 1u : 0u;
+        e.alive = 0;
+        e.team = gm::TEAM_BOTS;
+        if (e.active) SpawnEntity(i);
+    }
+    mem_.entityCount = static_cast<uint32_t>(count + 1);
+    Announce("WAVE " + std::to_string(wave));
+    Emit(GameEventType::WaveStart, Player().pos);
+}
+
+void Game::UpdateMatch(float dt) {
+    gm::MatchInfo& m = mem_.match;
+
+    // ---- time limit ----
+    if (m.timeLeft > 0.0f) {
+        m.timeLeft -= dt;
+        if (m.timeLeft <= 0.0f) {
+            m.timeLeft = 0.0f;
+            const gm::Entity& p = Player();
+            if (settings_.mode == gm::MODE_TRAINING) {
+                EndMatch("TRAINING COMPLETE", true);
+            } else if (settings_.mode == gm::MODE_TEAM_DEATHMATCH) {
+                if (m.teamScore[0] == m.teamScore[1]) EndMatch("DRAW", false);
+                else EndMatch(m.teamScore[0] > m.teamScore[1] ? "VICTORY" : "DEFEAT", m.teamScore[0] > m.teamScore[1]);
+            } else {
+                int best = 0;
+                for (int i = 1; i < gm::kMaxEntities; ++i)
+                    if (mem_.entities[i].active) best = std::max(best, mem_.entities[i].kills);
+                EndMatch(p.kills > best ? "VICTORY" : (p.kills == best ? "DRAW" : "DEFEAT"), p.kills > best);
+            }
+            return;
+        }
+    }
+
+    // ---- survival waves ----
+    if (settings_.mode == gm::MODE_SURVIVAL) {
+        if (waveBreak_ > 0.0f) {
+            waveBreak_ -= dt;
+            if (waveBreak_ <= 0.0f) StartWave(static_cast<int>(m.wave) + 1);
+            return;
+        }
+        int alive = 0;
+        for (int i = 1; i < gm::kMaxEntities; ++i) alive += mem_.entities[i].active && mem_.entities[i].alive;
+        if (alive == 0 && m.wave > 0) {
+            waveBreak_ = kWaveBreakTime;
+            Announce("WAVE " + std::to_string(m.wave) + " CLEARED");
+            // reward: refill health a bit
+            gm::Entity& p = Player();
+            if (p.alive) p.health = std::min(p.maxHealth, p.health + 25);
+        }
+    }
+
+    // ---- aim training: one target at a time ----
+    if (settings_.mode == gm::MODE_TRAINING) {
+        gm::Entity& t = mem_.entities[1];
+        if (t.active && t.alive) {
+            training_.targetAge += dt;
+        } else {
+            training_.nextSpawn -= dt;
+            if (training_.nextSpawn <= 0.0f) {
+                t.active = 1;
+                t.team = gm::TEAM_BOTS;
+                SpawnEntity(1);
+                training_.targetsSpawned++;
+                training_.targetAge = 0.0f;
+                training_.targetHit = false;
+            }
+        }
+    }
+}
+
+void Game::OnKill(int victim, int attacker) {
+    gm::MatchInfo& m = mem_.match;
+    const gm::Entity& v = mem_.entities[victim];
+    bool victimIsPlayer = victim == static_cast<int>(mem_.localPlayerIndex);
+
+    if (attacker >= 0 && mem_.entities[attacker].team != v.team) {
+        m.teamScore[mem_.entities[attacker].team == gm::TEAM_PLAYER ? 0 : 1]++;
+    }
+
+    switch (settings_.mode) {
+        case gm::MODE_DEATHMATCH:
+            if (attacker >= 0 && mem_.entities[attacker].kills >= kDmKillLimit) {
+                bool won = attacker == static_cast<int>(mem_.localPlayerIndex);
+                EndMatch(won ? "VICTORY" : "DEFEAT", won);
+            }
+            break;
+        case gm::MODE_TEAM_DEATHMATCH:
+            if (m.teamScore[0] >= kTdmScoreLimit) EndMatch("VICTORY", true);
+            else if (m.teamScore[1] >= kTdmScoreLimit) EndMatch("DEFEAT", false);
+            break;
+        case gm::MODE_SURVIVAL:
+            if (victimIsPlayer) {
+                m.livesLeft--;
+                if (m.livesLeft <= 0) EndMatch("GAME OVER", false);
+            }
+            break;
+        case gm::MODE_TRAINING:
+            if (victim == 1) {
+                training_.kills++;
+                training_.totalTimeToKill += training_.targetAge;
+                if (training_.bestTimeToKill <= 0.0f || training_.targetAge < training_.bestTimeToKill)
+                    training_.bestTimeToKill = training_.targetAge;
+                training_.nextSpawn = kTrainingRespawn;
+                mem_.entities[1].respawnTimer = 0.0f;
+            }
+            break;
+    }
+}
+
+void Game::EndMatch(const std::string& title, bool good) {
+    if (mem_.match.state == gm::MATCH_ENDED) return;
+    mem_.match.state = gm::MATCH_ENDED;
+    result_ = MatchResult{};
+    result_.title = title;
+    result_.good = good;
+
+    const gm::Entity& p = Player();
+    float acc = shotsFired > 0 ? 100.0f * shotsHit / shotsFired : 0.0f;
+    int secs = static_cast<int>(matchTime_);
+    char buf[160];
+    auto line = [&](const char* fmt, auto... args) {
+        std::snprintf(buf, sizeof(buf), fmt, args...);
+        result_.lines.push_back(buf);
+    };
+
+    line("%s  -  %s  -  %s", ModeName(settings_.mode), GetMap(settings_.map).name, DifficultyName(mem_.difficulty));
+    line("Time played\t%d:%02d", secs / 60, secs % 60);
+
+    float avgTtk = 0.0f, avgReaction = 0.0f;
+    switch (settings_.mode) {
+        case gm::MODE_DEATHMATCH: {
+            int place = 1;
+            for (int i = 1; i < gm::kMaxEntities; ++i)
+                if (mem_.entities[i].active && mem_.entities[i].kills > p.kills) ++place;
+            line("Place\t#%d of %d", place, botCount_ + 1);
+            break;
+        }
+        case gm::MODE_TEAM_DEATHMATCH:
+            line("Team score\t%d : %d", mem_.match.teamScore[0], mem_.match.teamScore[1]);
+            break;
+        case gm::MODE_SURVIVAL:
+            line("Waves survived\t%d", std::max(0, static_cast<int>(mem_.match.wave) - 1));
+            break;
+        case gm::MODE_TRAINING:
+            avgTtk = training_.kills > 0 ? training_.totalTimeToKill / training_.kills : 0.0f;
+            avgReaction = training_.reactions > 0 ? training_.totalReaction / training_.reactions : 0.0f;
+            line("Targets killed\t%d", training_.kills);
+            line("Kills / minute\t%.1f", training_.kills * 60.0f / std::max(1.0f, matchTime_));
+            line("Avg time to kill\t%.0f ms   (best %.0f ms)", avgTtk * 1000.0f, training_.bestTimeToKill * 1000.0f);
+            line("Avg first hit\t%.0f ms   (spawn -> first hit)", avgReaction * 1000.0f);
+            break;
+    }
+    line("Kills / deaths\t%d / %d", p.kills, p.deaths);
+    line("Accuracy\t%.1f%%   (%d / %d)", acc, shotsHit, shotsFired);
+
+    // One CSV line per match -> easy to compare runs with and without aimbot.
+    char date[32];
+    std::time_t now = std::time(nullptr);
+    std::strftime(date, sizeof(date), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+    char csv[512];
+    std::snprintf(csv, sizeof(csv), "%s,%s,%s,%s,%d,%.1f,%d,%d,%d,%d,%.1f,%.0f,%.0f,%u,%s", date,
+                  ModeName(settings_.mode), GetMap(settings_.map).name, DifficultyName(mem_.difficulty), botCount_,
+                  matchTime_, p.kills, p.deaths, shotsFired, shotsHit, acc, avgTtk * 1000.0f, avgReaction * 1000.0f,
+                  mem_.match.wave, title.c_str());
+    result_.csvLine = csv;
+    Emit(GameEventType::MatchEnd, p.pos);
+}
+
+// -----------------------------------------------------------------------------
+//  Player
+// -----------------------------------------------------------------------------
+
 void Game::UpdatePlayer(const PlayerInput& input, float dt) {
     gm::Entity& p = Player();
     playerFireCooldown_ -= dt;
+    dashCooldown_ = std::max(0.0f, dashCooldown_ - dt);
     if (!p.alive) return;
 
     // ---- weapon switching ----------------------------------------------------
@@ -484,9 +791,21 @@ void Game::UpdatePlayer(const PlayerInput& input, float dt) {
         Emit(GameEventType::Reload, p.pos, p.weapon);
     }
 
-    // ---- movement -------------------------------------------------------------------
-    Vec2f wish = Normalize(input.move) * kPlayerSpeed;
-    p.vel = MoveTowards(p.vel, wish, kPlayerAccel * dt);
+    // ---- movement (+ dash) -------------------------------------------------------------
+    if (input.dash && dashCooldown_ <= 0.0f) {
+        Vec2f dir = LengthSq(input.move) > 0.01f ? Normalize(input.move) : FromAngle(p.aimAngle);
+        dashDir_ = dir;
+        dashTimer_ = kDashTime;
+        dashCooldown_ = kDashCooldown;
+        Emit(GameEventType::Dash, p.pos);
+    }
+    if (dashTimer_ > 0.0f) {
+        dashTimer_ -= dt;
+        p.vel = dashDir_ * kDashSpeed;
+    } else {
+        Vec2f wish = Normalize(input.move) * kPlayerSpeed;
+        p.vel = MoveTowards(p.vel, wish, kPlayerAccel * dt);
+    }
     Vec2f moved = MoveCircle(p.pos, p.vel * dt, p.radius);
     // Store the real velocity (blocked by walls = slower), like the bots do.
     p.vel = moved / dt;
@@ -518,12 +837,34 @@ void Game::UpdatePlayer(const PlayerInput& input, float dt) {
     p.ammo = ammo;
 }
 
+// -----------------------------------------------------------------------------
+//  Bots
+// -----------------------------------------------------------------------------
+
+// Nearest enemy of `slot` that it can see (-1 = none).
+int Game::FindBotTarget(int slot, bool& canSee) {
+    const gm::Entity& bot = mem_.entities[slot];
+    int best = -1;
+    float bestDist = kBotViewRange;
+    for (int i = 0; i < gm::kMaxEntities; ++i) {
+        const gm::Entity& e = mem_.entities[i];
+        if (i == slot || !e.active || !e.alive || e.team == bot.team) continue;
+        float d = Distance(bot.pos, e.pos);
+        if (d < bestDist && LineOfSight(bot.pos, e.pos)) {
+            bestDist = d;
+            best = i;
+        }
+    }
+    canSee = best >= 0;
+    return best;
+}
+
 void Game::UpdateBot(int slot, float dt) {
     gm::Entity& bot = mem_.entities[slot];
     BotBrain&   b   = brains_[slot];
     const BotKindDef& kind = kBotKinds[bot.kind <= gm::KIND_HEAVY ? bot.kind : gm::KIND_SOLDIER];
     const DifficultyDef& diff = kDifficulties[mem_.difficulty <= 2 ? mem_.difficulty : 1];
-    const gm::Entity& player = Player();
+    const bool training = settings_.mode == gm::MODE_TRAINING;
 
     b.decisionTimer -= dt;
     b.dashTimer     -= dt;
@@ -531,6 +872,7 @@ void Game::UpdateBot(int slot, float dt) {
     b.fireCooldown  -= dt;
     b.reaction      -= dt;
     b.lastSeenTimer += dt;
+    b.retargetTimer -= dt;
 
     if (bot.reloadTimer > 0.0f) {
         bot.reloadTimer -= dt;
@@ -540,19 +882,39 @@ void Game::UpdateBot(int slot, float dt) {
         }
     }
 
-    Vec2f toPlayer = player.pos - bot.pos;
-    float dist = Length(toPlayer);
-    bool seesPlayer = player.alive && dist < kBotViewRange && LineOfSight(bot.pos, player.pos);
-    if (seesPlayer) {
+    // ---- who are we fighting? -----------------------------------------------------
+    if (b.retargetTimer <= 0.0f) {
+        b.retargetTimer = RandF(0.2f, 0.35f);
+        bool canSee = false;
+        int t = FindBotTarget(slot, canSee);
+        if (canSee && t != b.target) {
+            b.target = t;
+            b.lastSeenTimer = 99.0f;  // counts as "just spotted" below
+        }
+    }
+    const gm::Entity* tgt = nullptr;
+    if (b.target >= 0) {
+        const gm::Entity& t = mem_.entities[b.target];
+        if (t.active && t.alive && t.team != bot.team) tgt = &t;
+        else b.target = -1;
+    }
+
+    float dist = 1e9f;
+    bool seesTarget = false;
+    if (tgt) {
+        dist = Distance(bot.pos, tgt->pos);
+        seesTarget = dist < kBotViewRange && LineOfSight(bot.pos, tgt->pos);
+    }
+    if (seesTarget) {
         if (b.lastSeenTimer > 1.0f) b.reaction = RandF(0.25f, 0.5f) * diff.reaction;  // just spotted
         b.lastSeenTimer = 0.0f;
-        b.lastSeenPos = player.pos;
+        b.lastSeenPos = tgt->pos;
     }
-    bool engaging = player.alive && b.lastSeenTimer < 3.0f;
+    bool engaging = tgt && b.lastSeenTimer < 3.0f;
 
     // Low on health? Go for a health pack.
     int pack = -1;
-    if (bot.health < bot.maxHealth * 45 / 100) pack = NearestPickup(bot.pos, 1000.0f);
+    if (!training && bot.health < bot.maxHealth * 45 / 100) pack = NearestPickup(bot.pos, 1000.0f);
 
     // ---- movement decision -------------------------------------------------
     if (b.decisionTimer <= 0.0f) {
@@ -561,39 +923,45 @@ void Game::UpdateBot(int slot, float dt) {
         b.preferredDist = RandF(kind.distMin, kind.distMax);
         b.jitterAngle   = RandF(-0.6f, 0.6f);
 
-        // Is the player aiming at us? -> more likely to dodge with a dash.
-        float aimDiff = std::fabs(WrapAngle(player.aimAngle - AngleOf(bot.pos - player.pos)));
-        float dashChance = (seesPlayer && aimDiff < 0.2f) ? kind.dashChance + 0.35f : kind.dashChance;
+        // Is our target aiming at us? -> more likely to dodge with a dash.
+        float dashChance = kind.dashChance;
+        if (tgt && seesTarget) {
+            float aimDiff = std::fabs(WrapAngle(tgt->aimAngle - AngleOf(bot.pos - tgt->pos)));
+            if (aimDiff < 0.2f) dashChance += 0.35f;
+        }
         if (b.dashCooldown <= 0.0f && RandF(0, 1) < dashChance) {
             b.dashTimer    = RandF(0.15f, 0.3f);
             b.dashCooldown = RandF(0.8f, 1.6f);
         }
         if (!engaging && Distance(bot.pos, b.wanderTarget) < 80.0f) {
-            b.wanderTarget = FindSpawnPoint(false);
+            b.wanderTarget = FindSpawnPoint(bot.team);
         }
     }
 
     Vec2f desired{0, 0};
     if (pack >= 0) {
-        // Run to the health pack (still shooting if the player is visible).
+        // Run to the health pack (still shooting if the target is visible).
         Vec2f to = mem_.pickups[pack].pos - bot.pos;
         desired = Normalize(Rotate(to, b.jitterAngle * 0.3f));
     } else if (engaging) {
-        Vec2f target = seesPlayer ? player.pos : b.lastSeenPos;
+        Vec2f target = seesTarget ? tgt->pos : b.lastSeenPos;
         Vec2f to = target - bot.pos;
         float d = Length(to);
         Vec2f dir = Normalize(to);
-        if (seesPlayer) {
-            // Circle around the player at the preferred distance.
+        if (seesTarget) {
+            // Circle around the target at the preferred distance.
             // While reloading, back off a bit.
             float wanted = b.preferredDist + (bot.reloadTimer > 0.0f ? 200.0f : 0.0f);
             float radial = Clampf((d - wanted) / 150.0f, -1.0f, 1.0f);
             Vec2f tangent = Perp(dir) * b.strafeDir;
             desired = Normalize(Rotate(dir * radial + tangent, b.jitterAngle));
         } else {
-            // Hunt: walk to where the player was last seen.
+            // Hunt: walk to where the target was last seen.
             desired = d > 30.0f ? Rotate(dir, b.jitterAngle * 0.5f) : Vec2f{0, 0};
         }
+    } else if (training) {
+        // Training targets strafe around where they are.
+        desired = Normalize(Perp(Normalize(Player().pos - bot.pos)) * b.strafeDir);
     } else {
         desired = Normalize(Rotate(b.wanderTarget - bot.pos, b.jitterAngle * 0.3f));
     }
@@ -626,7 +994,7 @@ void Game::UpdateBot(int slot, float dt) {
             b.strafeDir     = -b.strafeDir;
             b.jitterAngle   = RandF(-1.2f, 1.2f);
             b.decisionTimer = RandF(0.3f, 0.6f);
-            b.wanderTarget  = FindSpawnPoint(false);
+            b.wanderTarget  = FindSpawnPoint(bot.team);
         }
     } else {
         b.stuckTimer = 0.0f;
@@ -634,10 +1002,10 @@ void Game::UpdateBot(int slot, float dt) {
 
     // ---- aiming & shooting ---------------------------------------------------
     float targetAngle;
-    if (seesPlayer) {
+    if (seesTarget) {
         // Bots lead their shots a little (imperfectly).
         float t = dist / kind.bulletSpeed * RandF(0.3f, 0.8f);
-        Vec2f aimPoint = player.pos + player.vel * t;
+        Vec2f aimPoint = tgt->pos + tgt->vel * t;
         targetAngle = AngleOf(aimPoint - bot.pos) + b.aimError;
     } else if (LengthSq(bot.vel) > 100.0f) {
         targetAngle = AngleOf(bot.vel);
@@ -648,7 +1016,8 @@ void Game::UpdateBot(int slot, float dt) {
 
     bool aimedWell = std::fabs(WrapAngle(targetAngle - bot.aimAngle)) < 0.15f;
     bool inRange = dist < kind.bulletSpeed * kind.bulletLife * 0.9f;
-    if (seesPlayer && inRange && !botsPeaceful && b.reaction <= 0.0f && b.fireCooldown <= 0.0f && aimedWell &&
+    bool mayShoot = !botsPeaceful && !training;
+    if (seesTarget && inRange && mayShoot && b.reaction <= 0.0f && b.fireCooldown <= 0.0f && aimedWell &&
         bot.reloadTimer <= 0.0f && bot.ammo > 0) {
         int damage = std::max(1, static_cast<int>(std::lround(kind.damage * diff.damage)));
         FireBullets(slot, bot.aimAngle, kind.bulletSpeed, damage, kind.pellets, kind.spread, kind.bulletLife, false);
@@ -658,6 +1027,10 @@ void Game::UpdateBot(int slot, float dt) {
         if (--bot.ammo <= 0) bot.reloadTimer = kBotReload;
     }
 }
+
+// -----------------------------------------------------------------------------
+//  Bullets & damage
+// -----------------------------------------------------------------------------
 
 void Game::FireBullets(int slot, float angle, float speed, int damage, int pellets, float spread,
                        float life, bool heavy) {
@@ -728,7 +1101,7 @@ void Game::UpdateBullets(float dt) {
                 ApplyDamage(hitEntity, bl.owner, bl.damage, hitPos, angle);
             } else {
                 effects_.push_back({EffectType::Spark, hitPos, angle, 0.0f, 0.25f, bl.team});
-                if (bl.team == gm::TEAM_PLAYER) Emit(GameEventType::WallHit, hitPos);
+                if (bl.owner == static_cast<int>(mem_.localPlayerIndex)) Emit(GameEventType::WallHit, hitPos);
             }
             bl.pos = hitPos;
             bl.active = false;
@@ -746,11 +1119,13 @@ void Game::Announce(const std::string& text) {
 }
 
 void Game::ApplyDamage(int victim, int attacker, int damage, Vec2f hitPos, float angle) {
+    if (mem_.match.state != gm::MATCH_PLAYING) return;
     gm::Entity& v = mem_.entities[victim];
+    if (!v.alive) return;
     bool victimIsPlayer = victim == static_cast<int>(mem_.localPlayerIndex);
     bool attackerIsPlayer = attacker == static_cast<int>(mem_.localPlayerIndex);
 
-    if (victimIsPlayer && (godMode || spawnProtection_ > 0.0f)) damage = 0;
+    if (victimIsPlayer && (godMode || spawnProtection_ > 0.0f || settings_.mode == gm::MODE_TRAINING)) damage = 0;
 
     effects_.push_back({EffectType::Blood, hitPos, angle, 0.0f, 0.3f, v.team});
     hitFlash_[victim] = 0.1f;
@@ -759,6 +1134,11 @@ void Game::ApplyDamage(int victim, int attacker, int damage, Vec2f hitPos, float
         hitMarker_ = 0.15f;
         texts_.push_back({hitPos, 0.0f, damage});
         Emit(GameEventType::PlayerHitEnemy, hitPos);
+        if (settings_.mode == gm::MODE_TRAINING && victim == 1 && !training_.targetHit) {
+            training_.targetHit = true;
+            training_.totalReaction += training_.targetAge;
+            training_.reactions++;
+        }
     }
     if (victimIsPlayer && damage > 0) {
         damageFlash_ = 0.25f;
@@ -783,7 +1163,8 @@ void Game::ApplyDamage(int victim, int attacker, int damage, Vec2f hitPos, float
          v.pos);
 
     std::string attackerName = attacker >= 0 ? mem_.entities[attacker].name : "?";
-    killFeed_.push_back({attackerName + "  >  " + v.name, 0.0f, victimIsPlayer || attackerIsPlayer});
+    bool involvesPlayer = victimIsPlayer || attackerIsPlayer;
+    killFeed_.push_back({attackerName + "  >  " + v.name, 0.0f, involvesPlayer});
     if (killFeed_.size() > 6) killFeed_.erase(killFeed_.begin());
 
     if (victimIsPlayer) {
@@ -801,6 +1182,8 @@ void Game::ApplyDamage(int victim, int attacker, int damage, Vec2f hitPos, float
         else if (killStreak_ == 15) Announce("GODLIKE");
         else if (killStreak_ > 15 && killStreak_ % 5 == 0) Announce(std::to_string(killStreak_) + " KILL STREAK");
     }
+
+    OnKill(victim, attacker);
 }
 
 void Game::UpdatePickups(float dt) {
@@ -830,6 +1213,9 @@ void Game::UpdateRespawns(float dt) {
     for (int i = 0; i < gm::kMaxEntities; ++i) {
         gm::Entity& e = mem_.entities[i];
         if (!e.active || e.alive) continue;
+        bool isPlayer = i == static_cast<int>(mem_.localPlayerIndex);
+        // Survival: enemies stay dead. Training: targets are spawned by UpdateMatch.
+        if (!isPlayer && (settings_.mode == gm::MODE_SURVIVAL || settings_.mode == gm::MODE_TRAINING)) continue;
         e.respawnTimer -= dt;
         if (e.respawnTimer <= 0.0f) SpawnEntity(i);
     }

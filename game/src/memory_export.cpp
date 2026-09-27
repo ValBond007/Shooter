@@ -118,6 +118,7 @@ std::string DescribeMemoryLayout() {
     GM_FIELD(entities, "Entity[32]");
     GM_FIELD(obstacles, "Obst.[32]");
     GM_FIELD(pickups, "Pick.[16]");
+    GM_FIELD(match, "MatchInfo");
 #undef GM_FIELD
     add("");
     add("Entity fields (offset from entities[i]):");
@@ -147,6 +148,9 @@ std::string DescribeMemoryLayout() {
     add("local player        = entities[0] at 0x%016" PRIX64, ents);
     add("pickups[i] address  = 0x%016" PRIX64 " + i * 0x%zX  (pos f32[2], type u32, available u32)",
         addr + offsetof(gm::GameMemory, pickups), sizeof(gm::Pickup));
+    add("match               = g_game + 0x%zX  (mode u32, state u32, timeLeft f32, map u32,",
+        offsetof(gm::GameMemory, match));
+    add("                        teamScore i32[2], wave u32, livesLeft i32)");
     add("world -> screen     : screen = (world - camTarget) * camZoom + camOffset");
     add("===================================================================");
     return out;

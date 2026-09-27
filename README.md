@@ -54,29 +54,51 @@ Only need one of the two programs? Pass `-DBUILD_AIMBOT=OFF` or `-DBUILD_GAME=OF
 Run `shooter.exe`. A console window opens next to the game and prints the
 memory layout (addresses and offsets). The same text goes to `shooter_offsets.txt`.
 
+The game starts in the **main menu**, where you pick the mode, map, number of bots,
+difficulty and fog of war (mouse or arrow keys + Enter).
+
+| Mode | Rules |
+|---|---|
+| **Deathmatch** | everyone against you, first to 25 kills or 5 minutes |
+| **Team Deathmatch** | you + allied bots (green) against enemy bots (red), first team to 50 kills |
+| **Survival** | waves of enemies that get bigger and tougher, enemies don't respawn, 3 lives |
+| **Aim Training** | 60 s, one moving target at a time, you can't die. Measures accuracy, time to kill and time to first hit |
+
+Maps: **Arena** (mixed cover), **Warehouse** (shelves and crates), **Corridors** (long lanes).
+
+Every finished match adds one line to **`shooter_results.csv`** (see
+[measuring the aimbot](#measuring-the-aimbot)).
+
 | Key | Action |
 |---|---|
 | WASD / arrows | move |
 | mouse | aim (the crosshair is the Windows cursor) |
 | left mouse | shoot |
+| `Shift` / `Space` | dash (short burst of speed, 1.2 s cooldown) |
 | `1` / `2` / `3` | rifle / shotgun / sniper |
 | `Q` | previous weapon |
 | `R` | reload |
 | mouse wheel | zoom |
 | `Tab` (hold) | scoreboard |
-| `+` / `-` | more / fewer bots (0-31) |
-| `Esc` / `P` | pause |
+| `+` / `-` | more / fewer bots (deathmatch modes) |
+| `Esc` / `P` | pause menu (resume, restart, main menu, quit) |
 | `M` | sound on / off |
 | `H` | help |
 | **F1** | **memory debug overlay**: module base, `g_game` address, RVA, live entity table with addresses |
 | F2 | god mode |
 | F3 | freeze bots (static targets, good for testing) |
 | F4 | peaceful bots (they don't shoot) |
-| F5 | restart round |
+| F5 | restart match |
 | F6 | difficulty: easy / normal / hard |
 | F7 | fog of war on / off |
 
-Command line: `shooter.exe --bots 12 --seed 123 --width 1600 --height 900`.
+Command line:
+```
+shooter.exe --mode dm|tdm|survival|training --map 0|1|2 --bots 12
+            --difficulty easy|normal|hard --no-fog --skip-menu
+            --seed 123 --width 1600 --height 900
+```
+`--skip-menu` starts the match right away (handy for testing).
 `--print-offsets` prints the layout and exits.
 
 ### Features
@@ -96,6 +118,8 @@ Command line: `shooter.exe --bots 12 --seed 123 --width 1600 --height 900`.
 - **Fog of war**: walls cast shadows and enemies you can't see aren't drawn.
   They are still in memory, so `aimbot radar` / `aimbot dump` show them. This is a
   nice demo of what reading memory gives you.
+- **Allied bots** in Team Deathmatch: they pick their own targets and fight enemy bots
+  (the `team` field in memory tells friend from foe).
 - Kill streaks (*DOUBLE KILL*, *KILLING SPREE*, …), scoreboard, 3 difficulty levels,
   spawn protection, screen shake, hit flashes, corpses, generated sound effects
   (no audio files needed).
@@ -114,7 +138,7 @@ Game facts that matter for the aimbot:
 Everything is in **one global struct** in the game's `.data` section:
 
 ```cpp
-gm::GameMemory g_game;   // shared/game_memory.h, size 0xF80
+gm::GameMemory g_game;   // shared/game_memory.h, size 0xFA0
 ```
 
 ```
@@ -128,6 +152,7 @@ g_game + 0x080  entities[32]   (0x60 bytes each, [0] = you)
                   +0x50 weapon  +0x54 ammo  +0x58 reloadTimer  +0x5C kind
 g_game + 0xC80  obstacles[32]  (walls)
 g_game + 0xE80  pickups[16]    (health packs)
+g_game + 0xF80  match          (mode, state, time left, team scores, wave, lives)
 ```
 
 Two ways to find it:
@@ -230,6 +255,29 @@ Windows mouse settings on the game PC: pointer speed 10/20 (the default) and
 | `sticky_target` | true | stay on one target while the key is held |
 | `game_rva` | 0 | 0 = scan, otherwise the fixed RVA |
 | `poll_interval_us` | 500 | pause between reads |
+
+---
+
+### Measuring the aimbot
+
+**Aim Training** mode gives you comparable numbers for the report. Run it a few times
+without the aimbot and a few times with it; each run adds a line to
+`shooter_results.csv` (open it in Excel):
+
+```
+date,mode,map,difficulty,bots,duration_s,kills,deaths,shots,hits,accuracy,avg_ttk_ms,avg_first_hit_ms,wave,result
+```
+
+Example from testing (60 s, holding the fire button, same seed):
+
+| | targets killed | accuracy | avg time to kill | avg time to first hit |
+|---|---|---|---|---|
+| no aimbot (cursor not moved) | 2 | 2.3 % | 27 s | 5.5 s |
+| aimbot (`smooth = 2`) | 28 | 32.9 % | 1.75 s | 0.9 s |
+
+Ideas for experiments: compare `smooth` values, `prediction` on/off, the three
+weapons (each has a different bullet speed), or DMA against local reading
+(`memory = winapi`).
 
 ---
 

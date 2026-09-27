@@ -42,7 +42,7 @@ namespace gm {
 // 15 characters + terminating zero = 16 bytes.
 #define GM_MAGIC_STRING "ARENA_SHOOTER!!"
 constexpr char     kMagic[16]     = GM_MAGIC_STRING;
-constexpr uint32_t kLayoutVersion = 2;
+constexpr uint32_t kLayoutVersion = 3;
 
 constexpr int kMaxEntities  = 32;  // slot 0 = local player, 1..31 = bots
 constexpr int kMaxObstacles = 32;
@@ -74,6 +74,19 @@ enum Difficulty : uint32_t {
     DIFFICULTY_EASY   = 0,
     DIFFICULTY_NORMAL = 1,
     DIFFICULTY_HARD   = 2,
+};
+
+enum GameMode : uint32_t {
+    MODE_DEATHMATCH      = 0,  // everyone against you, first to the kill limit
+    MODE_TEAM_DEATHMATCH = 1,  // you + allied bots (team 0) vs enemy bots (team 1)
+    MODE_SURVIVAL        = 2,  // waves of enemies, 3 lives
+    MODE_TRAINING        = 3,  // aim training: one moving target at a time, stats
+};
+
+enum MatchState : uint32_t {
+    MATCH_MENU    = 0,  // main menu, nothing is simulated
+    MATCH_PLAYING = 1,
+    MATCH_ENDED   = 2,  // result screen
 };
 
 enum PickupType : uint32_t {
@@ -130,7 +143,18 @@ struct Pickup {
     uint32_t available;      // 0x0C  1 = can be picked up, 0 = respawning / unused
 };
 
-// The global game state. Size: 0xF80 bytes.
+// Current match. Size: 0x20 bytes.
+struct MatchInfo {
+    uint32_t mode;           // 0x00  gm::GameMode
+    uint32_t state;          // 0x04  gm::MatchState
+    float    timeLeft;       // 0x08  seconds (0 = no time limit)
+    uint32_t map;            // 0x0C  map index
+    int32_t  teamScore[2];   // 0x10  kills per team (team 0 = your team)
+    uint32_t wave;           // 0x18  survival: current wave
+    int32_t  livesLeft;      // 0x1C  survival: lives left
+};
+
+// The global game state. Size: 0xFA0 bytes.
 struct GameMemory {
     // ---- header ----------------------------------------------------------
     char     magic[16];          // 0x000  "ARENA_SHOOTER!!"
@@ -166,14 +190,16 @@ struct GameMemory {
     Entity   entities[kMaxEntities];    // 0x080  32 * 0x60 = 0xC00
     Obstacle obstacles[kMaxObstacles];  // 0xC80  32 * 0x10 = 0x200
     Pickup   pickups[kMaxPickups];      // 0xE80  16 * 0x10 = 0x100
-};                                      // 0xF80  end
+    MatchInfo match;                    // 0xF80
+};                                      // 0xFA0  end
 
 // ---- layout checks (compile error if anything moves) ------------------------
 static_assert(sizeof(Vec2f) == 0x08, "Vec2f size");
 static_assert(sizeof(Entity) == 0x60, "Entity size");
 static_assert(sizeof(Obstacle) == 0x10, "Obstacle size");
 static_assert(sizeof(Pickup) == 0x10, "Pickup size");
-static_assert(sizeof(GameMemory) == 0xF80, "GameMemory size");
+static_assert(sizeof(MatchInfo) == 0x20, "MatchInfo size");
+static_assert(sizeof(GameMemory) == 0xFA0, "GameMemory size");
 
 static_assert(offsetof(Entity, id) == 0x00, "");
 static_assert(offsetof(Entity, active) == 0x04, "");
@@ -221,6 +247,7 @@ static_assert(offsetof(GameMemory, fogOfWar) == 0x07C, "");
 static_assert(offsetof(GameMemory, entities) == 0x080, "");
 static_assert(offsetof(GameMemory, obstacles) == 0xC80, "");
 static_assert(offsetof(GameMemory, pickups) == 0xE80, "");
+static_assert(offsetof(GameMemory, match) == 0xF80, "");
 
 // ---- helpers ------------------------------------------------------------------
 

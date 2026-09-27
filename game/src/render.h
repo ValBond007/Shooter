@@ -16,5 +16,8 @@ struct UiState {
 void DrawFrame(const Game& game, const gm::GameMemory& mem, const Camera2D& camera,
                const UiState& ui);
 
+// Main menu background: just the map (floor, walls, health packs).
+void DrawMenuBackground(const Game& game, const gm::GameMemory& mem, const Camera2D& camera);
+
 // Frees GPU resources used by the renderer (call before CloseWindow).
 void ShutdownRenderer();

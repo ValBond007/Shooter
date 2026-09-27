@@ -1,4 +1,4 @@
-# Memory layout (layout version 2)
+# Memory layout (layout version 3)
 
 Source of truth: [`shared/game_memory.h`](../shared/game_memory.h). Every offset
 below is checked there with `static_assert`, so these tables can't silently
@@ -22,13 +22,13 @@ g_game = moduleBase("shooter.exe") + RVA
 `SizeOfImage` comes from the PE header: `e_lfanew = *(i32*)(base + 0x3C)`, then
 `SizeOfImage = *(u32*)(base + e_lfanew + 0x50)`.
 
-## `GameMemory` (size 0xF80)
+## `GameMemory` (size 0xFA0)
 
 | Offset | Type | Name | Notes |
 |---:|---|---|---|
 | 0x000 | char[16] | `magic` | `"ARENA_SHOOTER!!"` |
-| 0x010 | u32 | `layoutVersion` | 2 |
-| 0x014 | u32 | `structSize` | 0xF80 |
+| 0x010 | u32 | `layoutVersion` | 3 |
+| 0x014 | u32 | `structSize` | 0xFA0 |
 | 0x018 | u64 | `selfAddress` | address of `g_game` itself |
 | 0x020 | u32 | `frameCount` | +1 per rendered frame |
 | 0x024 | f32 | `gameTime` | seconds |
@@ -43,7 +43,7 @@ g_game = moduleBase("shooter.exe") + RVA
 | 0x050 | vec2 | `mouseScreen` | cursor / crosshair in window pixels |
 | 0x058 | vec2 | `mouseWorld` | cursor in world units |
 | 0x060 | u32 | `buttons` | bit0 left, bit1 right, bit2 middle |
-| 0x064 | u32 | `paused` | |
+| 0x064 | u32 | `paused` | 1 while paused, in a menu or on the result screen |
 | 0x068 | vec2 | `arenaSize` | 2400 × 1600 |
 | 0x070 | f32 | `bulletSpeed` | bullet speed of the player's current weapon (1300 / 1000 / 2600) |
 | 0x074 | u32 | `obstacleCount` | |
@@ -52,6 +52,7 @@ g_game = moduleBase("shooter.exe") + RVA
 | 0x080 | Entity[32] | `entities` | stride 0x60 |
 | 0xC80 | Obstacle[32] | `obstacles` | stride 0x10 |
 | 0xE80 | Pickup[16] | `pickups` | stride 0x10 |
+| 0xF80 | MatchInfo | `match` | see below |
 
 ## `Entity` (size 0x60)
 
@@ -62,7 +63,7 @@ g_game = moduleBase("shooter.exe") + RVA
 | 0x00 | u32 | `id` | new id every spawn |
 | 0x04 | u32 | `active` | slot used |
 | 0x08 | u32 | `alive` | |
-| 0x0C | u32 | `team` | 0 = player, 1 = bots |
+| 0x0C | u32 | `team` | 0 = your team (you + allies in Team Deathmatch), 1 = enemies |
 | 0x10 | i32 | `health` | |
 | 0x14 | i32 | `maxHealth` | player/soldier 100, runner 60, heavy 220 |
 | 0x18 | vec2 | `pos` | world position (center) |
@@ -97,6 +98,18 @@ g_game = moduleBase("shooter.exe") + RVA
 | 0x00 | vec2 | `pos` | world position |
 | 0x08 | u32 | `type` | 0 = health pack |
 | 0x0C | u32 | `available` | 0 while respawning |
+
+## `MatchInfo` (size 0x20, at `g_game + 0xF80`)
+
+| Offset | Type | Name | Notes |
+|---:|---|---|---|
+| 0x00 | u32 | `mode` | 0 deathmatch, 1 team deathmatch, 2 survival, 3 aim training |
+| 0x04 | u32 | `state` | 0 main menu, 1 playing, 2 result screen |
+| 0x08 | f32 | `timeLeft` | seconds, 0 = no time limit |
+| 0x0C | u32 | `map` | 0 Arena, 1 Warehouse, 2 Corridors |
+| 0x10 | i32[2] | `teamScore` | kills of team 0 / team 1 |
+| 0x18 | u32 | `wave` | survival wave |
+| 0x1C | i32 | `livesLeft` | survival lives |
 
 ## World → screen
 

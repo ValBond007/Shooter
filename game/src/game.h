@@ -18,6 +18,37 @@ struct PlayerInput {
     bool  shoot = false;    // fire button held
     bool  reload = false;   // reload key pressed this frame
     int   selectWeapon = -1;  // 0..2 = switch weapon, -1 = no change
+    bool  dash = false;     // dash key pressed this frame
+};
+
+// What the player picked in the main menu.
+struct MatchSettings {
+    uint32_t mode       = gm::MODE_DEATHMATCH;
+    int      map        = 0;
+    int      bots       = 8;
+    uint32_t difficulty = gm::DIFFICULTY_NORMAL;
+};
+
+// Aim training statistics (MODE_TRAINING).
+struct TrainingStats {
+    int   targetsSpawned = 0;
+    int   kills          = 0;
+    float totalTimeToKill = 0.0f;   // sum of spawn -> kill times
+    float totalReaction  = 0.0f;    // sum of spawn -> first hit times
+    int   reactions      = 0;
+    float bestTimeToKill = 0.0f;
+    // current target
+    float targetAge      = 0.0f;
+    bool  targetHit      = false;
+    float nextSpawn      = 0.0f;
+};
+
+// Shown on the result screen when a match ends.
+struct MatchResult {
+    std::string              title;     // "VICTORY", "DEFEAT", ...
+    bool                     good = false;
+    std::vector<std::string> lines;     // stats
+    std::string              csvLine;   // appended to shooter_results.csv
 };
 
 struct WeaponDef {
@@ -36,6 +67,8 @@ struct WeaponDef {
 const WeaponDef& GetWeaponDef(uint32_t weapon);
 const char* DifficultyName(uint32_t difficulty);
 const char* KindName(uint32_t kind);
+const char* ModeName(uint32_t mode);
+const char* ModeDescription(uint32_t mode);
 
 struct Bullet {
     bool     active = false;
@@ -61,7 +94,9 @@ struct BotBrain {
     float aimError      = 0.0f;
     float baseSpeed     = 240.0f;
     float stuckTimer    = 0.0f;
-    float lastSeenTimer = 99.0f;  // seconds since the player was last seen
+    float lastSeenTimer = 99.0f;  // seconds since the target was last seen
+    int   target        = -1;     // entity slot this bot is fighting
+    float retargetTimer = 0.0f;
     Vec2f lastSeenPos{0, 0};
     Vec2f wanderTarget{0, 0};
 };
@@ -93,7 +128,8 @@ struct KillFeedEntry {
 // Things that happened this tick, for sound and screen shake (main.cpp).
 enum class GameEventType {
     Shot, PlayerShot, Hit, PlayerHitEnemy, PlayerHurt, Kill, PlayerKill, PlayerDied,
-    Reload, ReloadDone, Empty, WeaponSwitch, Pickup, WallHit, Respawn,
+    Reload, ReloadDone, Empty, WeaponSwitch, Pickup, WallHit, Respawn, Dash, WaveStart,
+    MatchEnd,
 };
 
 struct GameEvent {
@@ -114,7 +150,22 @@ public:
 
     Game(gm::GameMemory& mem, uint32_t seed);
 
-    void Reset();                 // new round: respawn everyone, clear scores
+    // Starts a new match (mode, map, bots, difficulty). Reset() restarts the current one.
+    void StartMatch(const MatchSettings& settings);
+    void Reset() { StartMatch(settings_); }
+    // Main menu: shows `map` in the background, nothing is simulated.
+    void EnterMenu(int map);
+    const MatchSettings& Settings() const { return settings_; }
+    bool Playing() const { return mem_.match.state == gm::MATCH_PLAYING; }
+    bool MatchOver() const { return mem_.match.state == gm::MATCH_ENDED; }
+    const MatchResult& Result() const { return result_; }
+    const TrainingStats& Training() const { return training_; }
+    float WaveBreak() const { return waveBreak_; }
+    float MatchTime() const { return matchTime_; }
+
+    // Kill / score limits of the current mode (0 = none).
+    int  KillLimit() const;
+
     void SetBotCount(int count);  // 0 .. kMaxEntities-1
     int  BotCount() const { return botCount_; }
 
@@ -151,6 +202,8 @@ public:
     int   PlayerAmmo(int weapon) const { return playerAmmo_[weapon]; }
     int   KillStreak() const { return killStreak_; }
     float PickupRespawn(int i) const { return pickupTimers_[i]; }
+    float DashCooldown() const { return dashCooldown_; }
+    static constexpr float kDashCooldown = 1.2f;
 
     int shotsFired = 0;
     int shotsHit   = 0;
@@ -159,9 +212,15 @@ public:
     const gm::Entity& Player() const { return mem_.entities[mem_.localPlayerIndex]; }
 
 private:
-    void BuildArena();
+    void BuildArena(int map);
     void SpawnEntity(int slot);
-    Vec2f FindSpawnPoint(bool farFromPlayer);
+    Vec2f FindSpawnPoint(uint32_t team);
+    Vec2f FindTrainingSpawn();
+    int  FindBotTarget(int slot, bool& canSee);
+    void UpdateMatch(float dt);
+    void StartWave(int wave);
+    void EndMatch(const std::string& title, bool good);
+    void OnKill(int victim, int attacker);
 
     void UpdatePlayer(const PlayerInput& input, float dt);
     void UpdateBot(int slot, float dt);
@@ -206,6 +265,19 @@ private:
     Announcement announcement_;
 
     float pickupTimers_[gm::kMaxPickups] = {};
+
+    // match state
+    MatchSettings settings_;
+    MatchResult   result_;
+    TrainingStats training_;
+    float         matchTime_ = 0.0f;   // seconds played
+    float         waveBreak_ = 0.0f;   // survival: countdown to the next wave
+    int           playerDeathsAllowed_ = 0;
+
+    // player dash
+    float dashTimer_ = 0.0f;
+    float dashCooldown_ = 0.0f;
+    Vec2f dashDir_{0, 0};
 
     BotBrain                   brains_[gm::kMaxEntities];
     std::vector<Bullet>        bullets_;

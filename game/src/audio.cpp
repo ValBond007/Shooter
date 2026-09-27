@@ -1,6 +1,7 @@
 #include "audio.h"
 
 #include <cmath>
+#include <algorithm>
 #include <cstdlib>
 #include <functional>
 #include <random>
@@ -127,6 +128,26 @@ bool Audio::Init() {
         return 0.3f * std::sin(kTwoPi * f * t) * Env(t, 6);
     });
 
+    {
+        Noise n;
+        src[SND_DASH] = Synthesize(0.22f, [&](float t) {
+            float env = std::sin(3.14159f * t / 0.22f);  // swell up and down
+            return 0.5f * n.Next(0.05f + 0.4f * t) * env;
+        });
+    }
+    src[SND_WAVE] = Synthesize(0.9f, [](float t) {
+        float f = t < 0.45f ? 196.0f : 262.0f;
+        float saw = 2.0f * (f * t - std::floor(f * t + 0.5f));
+        return 0.3f * saw * Env(t < 0.45f ? t : t - 0.45f, 4);
+    });
+    src[SND_MATCH_END] = Synthesize(1.0f, [](float t) {
+        const float notes[4] = {523.0f, 659.0f, 784.0f, 1047.0f};
+        int i = std::min(3, static_cast<int>(t / 0.15f));
+        float local = t - i * 0.15f;
+        return 0.35f * std::sin(kTwoPi * notes[i] * t) * Env(i == 3 ? local : local * 3.0f, 3);
+    });
+    src[SND_CLICK] = Synthesize(0.04f, [](float t) { return 0.4f * std::sin(kTwoPi * 900 * t) * Env(t, 90); });
+
     for (int s = 0; s < SND_COUNT; ++s)
         for (int v = 0; v < kVoices; ++v) voices_->alias[s][v] = LoadSoundAlias(src[s]);
     ready_ = true;
@@ -170,6 +191,9 @@ void Audio::PlayEvents(const std::vector<GameEvent>& events, Vec2f listener) {
             case GameEventType::WallHit:        Play(SND_WALL, 0.3f * att, jitter); break;
             case GameEventType::Respawn:        Play(SND_RESPAWN, 0.4f); break;
             case GameEventType::Hit:            break;
+            case GameEventType::Dash:           Play(SND_DASH, 0.5f, jitter); break;
+            case GameEventType::WaveStart:      Play(SND_WAVE, 0.6f); break;
+            case GameEventType::MatchEnd:       Play(SND_MATCH_END, 0.6f); break;
         }
     }
 }

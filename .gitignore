@@ -8,3 +8,4 @@ CMakeUserPresets.json
 # generated at runtime
 shooter_offsets.txt
 screenshot*.png
+shooter_results.csv

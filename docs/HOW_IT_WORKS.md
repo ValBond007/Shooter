@@ -56,7 +56,7 @@ Consequences you can measure with `aimbot bench`:
 - Each read is a **round trip** over USB + PCIe, so latency is much higher than a local
   `ReadProcessMemory`.
 - Reading 8 bytes costs about as much as reading 4 KiB, so **few big reads beat many
-  small ones**. That is why the aimbot reads the whole `GameMemory` (0xF80 bytes) in
+  small ones**. That is why the aimbot reads the whole `GameMemory` (0xFA0 bytes) in
   one go instead of reading each field.
 - Memory can change while it is being read (the game writes, we read), so a snapshot
   can mix two frames. For an aimbot that's fine; `frameCount` shows how fresh the
@@ -133,7 +133,18 @@ from memory, small errors (DPI scaling, acceleration, a wrong `mouse_scale`) cor
 themselves. It only moves once per new `frameCount`: the game samples the cursor once
 per frame, and moving again before that would use stale data and overshoot.
 
-## 9. Code map
+## 9. Measuring the result
+
+Aim Training mode spawns one moving target at a time for 60 s and measures:
+
+- **time to first hit**: from the target appearing to the first bullet hitting it (reaction + aiming)
+- **time to kill**: from appearing to dying (100 HP = 4 rifle hits)
+- **accuracy**: hits / shots
+
+Every match is saved to `shooter_results.csv`, so runs with and without the aimbot (or
+with different settings) can be compared in a table or chart.
+
+## 10. Code map
 
 | File | Role |
 |---|---|
@@ -142,6 +153,8 @@ per frame, and moving again before that would use stale data and overshoot.
 | `game/src/game.cpp` | simulation, bot AI, bullets |
 | `game/src/render.cpp` | drawing, fog of war, HUD, F1 debug overlay |
 | `game/src/audio.cpp` | generated sound effects |
+| `game/src/maps.cpp` | the three map layouts |
+| `game/src/ui.cpp` | main menu, pause menu, result screen |
 | `aimbot/src/memory/memory_dma.cpp` | MemProcFS backend |
 | `aimbot/src/memory/memory_winapi.cpp` | ReadProcessMemory backend (testing) |
 | `aimbot/src/game_reader.cpp` | find `g_game`, read snapshots |

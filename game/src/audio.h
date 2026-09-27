@@ -17,13 +17,16 @@ public:
     // position, used to make far away sounds quieter.
     void PlayEvents(const std::vector<GameEvent>& events, Vec2f listener);
 
+    // Short click for menu buttons.
+    void PlayClick() { Play(SND_CLICK, 0.4f); }
+
     bool muted = false;
 
 private:
     enum SoundId {
         SND_RIFLE, SND_SHOTGUN, SND_SNIPER, SND_HIT, SND_KILL, SND_HURT, SND_RELOAD,
         SND_RELOAD_DONE, SND_EMPTY, SND_SWITCH, SND_PICKUP, SND_DEATH, SND_RESPAWN,
-        SND_WALL, SND_COUNT
+        SND_WALL, SND_DASH, SND_WAVE, SND_MATCH_END, SND_CLICK, SND_COUNT
     };
     void Play(SoundId id, float volume, float pitch = 1.0f);
 

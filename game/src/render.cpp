@@ -38,6 +38,20 @@ bool g_fogTextureLoaded = false;
 
 Color TeamColor(uint32_t team) { return team == gm::TEAM_PLAYER ? kPlayerColor : kSoldierColor; }
 
+const Color kAllyColor   = {60, 205, 175, 255};
+const Color kAllyRunner  = {120, 235, 150, 255};
+const Color kAllyHeavy   = {30, 140, 130, 255};
+
+Color KindColor(uint32_t kind);
+
+// Your team is blue/green, the enemy team red/orange.
+Color EntityColor(const gm::Entity& e) {
+    if (e.team == gm::TEAM_PLAYER && e.kind != gm::KIND_PLAYER) {
+        return e.kind == gm::KIND_RUNNER ? kAllyRunner : (e.kind == gm::KIND_HEAVY ? kAllyHeavy : kAllyColor);
+    }
+    return KindColor(e.kind);
+}
+
 Color KindColor(uint32_t kind) {
     switch (kind) {
         case gm::KIND_PLAYER: return kPlayerColor;
@@ -93,6 +107,7 @@ bool IsShown(const gm::GameMemory& mem, int i) {
     const gm::Entity& e = mem.entities[i];
     if (!e.active || !e.alive) return false;
     if (i == static_cast<int>(mem.localPlayerIndex)) return true;
+    if (e.team == mem.entities[mem.localPlayerIndex].team) return true;  // allies are always shown
     bool playerAlive = mem.entities[mem.localPlayerIndex].alive != 0;
     return !mem.fogOfWar || !playerAlive || e.visible;
 }
@@ -211,7 +226,7 @@ void DrawCorpses(const Game& game) {
 
 void DrawEntity(const Game& game, const gm::GameMemory& mem, int slot) {
     const gm::Entity& e = mem.entities[slot];
-    Color body = KindColor(e.kind);
+    Color body = EntityColor(e);
     bool hidden = !e.visible;  // no line of sight (only drawn like this when fog is off)
     if (hidden) body = WithAlpha(Darker(body, 0.8f), 0.55f);
     float alpha = body.a / 255.0f;
@@ -461,6 +476,62 @@ void DrawWeaponBar(const Game& game) {
     }
 }
 
+// Top center: timer, scores, wave, training stats.
+void DrawMatchInfo(const Game& game, const gm::GameMemory& mem) {
+    const int sw = GetScreenWidth();
+    const gm::MatchInfo& m = mem.match;
+    char main[96] = "", sub[128] = "";
+    int secs = static_cast<int>(std::ceil(m.timeLeft));
+
+    switch (m.mode) {
+        case gm::MODE_DEATHMATCH: {
+            int leader = 0;
+            for (int i = 0; i < gm::kMaxEntities; ++i)
+                if (mem.entities[i].active) leader = std::max(leader, mem.entities[i].kills);
+            std::snprintf(main, sizeof(main), "%d:%02d", secs / 60, secs % 60);
+            std::snprintf(sub, sizeof(sub), "you %d  -  leader %d  /  %d kills", game.Player().kills, leader,
+                          game.KillLimit());
+            break;
+        }
+        case gm::MODE_TEAM_DEATHMATCH:
+            std::snprintf(main, sizeof(main), "%d  :  %d", m.teamScore[0], m.teamScore[1]);
+            std::snprintf(sub, sizeof(sub), "%d:%02d   first to %d", secs / 60, secs % 60, game.KillLimit());
+            break;
+        case gm::MODE_SURVIVAL: {
+            int alive = 0;
+            for (int i = 1; i < gm::kMaxEntities; ++i) alive += mem.entities[i].active && mem.entities[i].alive;
+            std::snprintf(main, sizeof(main), "WAVE %u", m.wave);
+            if (game.WaveBreak() > 0.0f)
+                std::snprintf(sub, sizeof(sub), "next wave in %.0f   lives %d", std::ceil(game.WaveBreak()), m.livesLeft);
+            else
+                std::snprintf(sub, sizeof(sub), "enemies left %d   lives %d", alive, m.livesLeft);
+            break;
+        }
+        case gm::MODE_TRAINING: {
+            const TrainingStats& t = game.Training();
+            float avg = t.kills > 0 ? t.totalTimeToKill / t.kills * 1000.0f : 0.0f;
+            float acc = game.shotsFired > 0 ? 100.0f * game.shotsHit / game.shotsFired : 0.0f;
+            std::snprintf(main, sizeof(main), "%d:%02d", secs / 60, secs % 60);
+            std::snprintf(sub, sizeof(sub), "targets %d   avg time to kill %.0f ms   accuracy %.0f%%", t.kills, avg, acc);
+            break;
+        }
+    }
+    int w = std::max(MeasureText(main, 30), MeasureText(sub, 20)) + 40;
+    DrawRectangle(sw / 2 - w / 2, 6, w, 64, WithAlpha(kPanel, 0.75f));
+    if (m.mode == gm::MODE_TEAM_DEATHMATCH) {
+        // colored team scores
+        char a[16], b[16];
+        std::snprintf(a, sizeof(a), "%d", m.teamScore[0]);
+        std::snprintf(b, sizeof(b), "%d", m.teamScore[1]);
+        DrawTextShadow(a, sw / 2 - 30 - MeasureText(a, 30), 10, 30, kAllyColor);
+        DrawTextCentered(":", sw / 2, 10, 30, kText);
+        DrawTextShadow(b, sw / 2 + 30, 10, 30, kSoldierColor);
+    } else {
+        DrawTextCentered(main, sw / 2, 10, 30, kText);
+    }
+    DrawTextCentered(sub, sw / 2, 44, 20, kTextDim);
+}
+
 void DrawHud(const Game& game, const gm::GameMemory& mem, const UiState& ui) {
     const int sw = GetScreenWidth(), sh = GetScreenHeight();
     const gm::Entity& p = game.Player();
@@ -474,6 +545,13 @@ void DrawHud(const Game& game, const gm::GameMemory& mem, const UiState& ui) {
                      frac > 0.5f ? kAccent : (frac > 0.25f ? ORANGE : RED));
     std::snprintf(buf, sizeof(buf), "HP %d / %d", p.health, p.maxHealth);
     DrawTextShadow(buf, static_cast<int>(bar.x) + 10, static_cast<int>(bar.y) + 4, 20, kText);
+    // dash cooldown (thin bar under the health bar)
+    float dashFrac = 1.0f - game.DashCooldown() / Game::kDashCooldown;
+    DrawRectangle(static_cast<int>(bar.x), static_cast<int>(bar.y + bar.height + 3), static_cast<int>(bar.width), 5, kPanel);
+    DrawRectangle(static_cast<int>(bar.x), static_cast<int>(bar.y + bar.height + 3),
+                  static_cast<int>(bar.width * dashFrac), 5, dashFrac >= 1.0f ? SKYBLUE : WithAlpha(SKYBLUE, 0.4f));
+
+    DrawMatchInfo(game, mem);
 
     float acc = game.shotsFired > 0 ? 100.0f * game.shotsHit / game.shotsFired : 0.0f;
     std::snprintf(buf, sizeof(buf), "Streak %d   Accuracy %.0f%%", game.KillStreak(), acc);
@@ -495,7 +573,7 @@ void DrawHud(const Game& game, const gm::GameMemory& mem, const UiState& ui) {
     if (game.botsPeaceful) { DrawTextShadow("BOTS PEACEFUL (F4)", 12, y, 20, kAccent); y += 22; }
     if (mem.buttons & gm::BUTTON_RIGHT) { DrawTextShadow("RMB held", 12, y, 20, kTextDim); y += 22; }
     if (ui.helpHintTimer > 0.0f && !ui.showHelp) {
-        DrawTextShadow("H = help / controls    F1 = memory debug    Tab = scores", 12, y, 20,
+        DrawTextShadow("H help   F1 memory   Tab scores", 12, y, 20,
                        WithAlpha(kText, Clampf(ui.helpHintTimer, 0.0f, 1.0f)));
     }
 
@@ -540,7 +618,10 @@ void DrawHud(const Game& game, const gm::GameMemory& mem, const UiState& ui) {
     if (!p.alive) {
         DrawRectangle(0, 0, sw, sh, Color{60, 0, 0, 90});
         DrawTextCentered("YOU DIED", sw / 2, sh / 2 - 50, 60, Color{255, 90, 90, 255});
-        std::snprintf(buf, sizeof(buf), "respawning in %.1f", p.respawnTimer);
+        if (mem.match.mode == gm::MODE_SURVIVAL)
+            std::snprintf(buf, sizeof(buf), "respawning in %.1f   (%d lives left)", p.respawnTimer, mem.match.livesLeft);
+        else
+            std::snprintf(buf, sizeof(buf), "respawning in %.1f", p.respawnTimer);
         DrawTextCentered(buf, sw / 2, sh / 2 + 20, 20, kText);
     }
 }
@@ -572,7 +653,7 @@ void DrawMinimap(const Game& game, const gm::GameMemory& mem, const Camera2D& ca
     for (int i = 0; i < gm::kMaxEntities; ++i) {
         if (!IsShown(mem, i)) continue;
         const gm::Entity& e = mem.entities[i];
-        Color c = KindColor(e.kind);
+        Color c = EntityColor(e);
         if (!e.visible) c = WithAlpha(c, 0.35f);
         DrawCircleV(Vector2{x0 + e.pos.x * scale, y0 + e.pos.y * scale},
                     i == static_cast<int>(mem.localPlayerIndex) ? 4.0f : 3.0f, c);
@@ -612,7 +693,7 @@ void DrawScoreboard(const gm::GameMemory& mem) {
         std::snprintf(buf, sizeof(buf), "%d", r + 1);
         DrawText(buf, cols[0], ry, 20, c);
         DrawText(e.name, cols[1], ry, 20, me ? kPlayerColor : c);
-        DrawText(KindName(e.kind), cols[2], ry, 20, KindColor(e.kind));
+        DrawText(KindName(e.kind), cols[2], ry, 20, EntityColor(e));
         std::snprintf(buf, sizeof(buf), "%d", e.kills);
         DrawText(buf, cols[3], ry, 20, c);
         std::snprintf(buf, sizeof(buf), "%d", e.deaths);
@@ -692,11 +773,12 @@ void DrawHelp() {
         {"Left mouse", "shoot"},
         {"1 / 2 / 3", "rifle / shotgun / sniper"},
         {"Q", "previous weapon"},
+        {"Shift / Space", "dash"},
         {"R", "reload"},
         {"Mouse wheel", "zoom"},
         {"Tab (hold)", "scoreboard"},
         {"+ / -", "more / fewer bots"},
-        {"Esc / P", "pause"},
+        {"Esc / P", "pause menu"},
         {"M", "sound on / off"},
         {"", ""},
         {"F1", "memory debug overlay (addresses)"},
@@ -745,12 +827,16 @@ void DrawFrame(const Game& game, const gm::GameMemory& mem, const Camera2D& came
     if (ui.debugOverlay) DrawDebugPanel(mem);
     if (ui.showScoreboard) DrawScoreboard(mem);
     if (ui.showHelp) DrawHelp();
-    if (ui.paused && !ui.showHelp) {
-        DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{0, 0, 0, 120});
-        DrawTextCentered("PAUSED", GetScreenWidth() / 2, GetScreenHeight() / 2 - 30, 60, kText);
-        DrawTextCentered("Esc / P to continue", GetScreenWidth() / 2, GetScreenHeight() / 2 + 40, 20, kTextDim);
-    }
-    DrawCrosshair(game, mem, camera);
+    if (!ui.paused && !ui.showHelp && game.Playing()) DrawCrosshair(game, mem, camera);
+}
+
+void DrawMenuBackground(const Game& game, const gm::GameMemory& mem, const Camera2D& camera) {
+    ClearBackground(kBackground);
+    BeginMode2D(camera);
+    DrawFloor(mem);
+    DrawPickups(game, mem);
+    DrawObstacles(mem);
+    EndMode2D();
 }
 
 void ShutdownRenderer() {
