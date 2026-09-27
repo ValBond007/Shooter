@@ -12,26 +12,70 @@ constexpr float kPi = 3.14159265358979f;
 constexpr float kArenaW = 2400.0f;
 constexpr float kArenaH = 1600.0f;
 
-constexpr float kPlayerRadius      = 18.0f;
-constexpr float kPlayerSpeed       = 290.0f;
-constexpr float kPlayerAccel       = 3200.0f;
-constexpr int   kPlayerMaxHealth   = 100;
-constexpr float kPlayerFireDelay   = 0.12f;   // seconds between shots
-constexpr float kPlayerBulletSpeed = 1300.0f;
-constexpr int   kPlayerDamage      = 25;      // 4 hits to kill a bot
-constexpr float kPlayerRespawn     = 3.0f;
+constexpr float kPlayerRadius    = 18.0f;
+constexpr float kPlayerSpeed     = 290.0f;
+constexpr float kPlayerAccel     = 3200.0f;
+constexpr int   kPlayerMaxHealth = 100;
+constexpr float kPlayerRespawn   = 3.0f;
+constexpr float kSpawnProtection = 2.0f;
 
-constexpr float kBotRadius      = 18.0f;
-constexpr float kBotAccel       = 2200.0f;
-constexpr int   kBotMaxHealth   = 100;
-constexpr float kBotBulletSpeed = 750.0f;
-constexpr int   kBotDamage      = 5;
-constexpr float kBotRespawn     = 2.5f;
-constexpr float kBotViewRange   = 1100.0f;
-constexpr float kBotTurnSpeed   = 7.0f;       // radians / second
+constexpr float kBotAccel     = 2200.0f;
+constexpr float kBotRespawn   = 2.5f;
+constexpr float kBotViewRange = 1100.0f;
+constexpr float kBotTurnSpeed = 7.0f;  // radians / second
+constexpr float kBotReload    = 2.0f;
 
-constexpr float kBulletLife   = 1.6f;
 constexpr float kBulletRadius = 3.0f;
+
+constexpr int   kHealthPackAmount  = 40;
+constexpr float kHealthPackRespawn = 20.0f;
+constexpr float kPickupRadius      = 16.0f;
+
+// ---- player weapons (index = gm::WeaponId) ------------------------------------------
+//                          name       delay  speed  dmg pel spread  mag reload life  shake
+const WeaponDef kWeapons[gm::kWeaponCount] = {
+    {"Rifle",   0.11f, 1300.0f,  25, 1, 0.00f, 30, 1.6f, 1.6f, 1.5f},
+    {"Shotgun", 0.80f, 1000.0f,  14, 7, 0.38f,  6, 2.0f, 0.45f, 6.0f},
+    {"Sniper",  1.10f, 2600.0f, 100, 1, 0.00f,  5, 2.4f, 1.2f, 7.0f},
+};
+
+// ---- bot types (index = gm::EntityKind) ----------------------------------------------
+struct BotKindDef {
+    float    speedMin, speedMax;
+    int      health;
+    float    radius;
+    float    fireMin, fireMax;   // seconds between shots
+    float    bulletSpeed;
+    int      damage;             // per pellet
+    int      pellets;
+    float    spread;
+    float    bulletLife;
+    float    distMin, distMax;   // preferred fighting distance
+    float    dashChance;
+    int      magSize;
+    uint32_t weapon;
+};
+const BotKindDef kBotKinds[4] = {
+    {},  // KIND_PLAYER (unused)
+    {220, 270, 100, 18, 0.55f, 1.10f, 750, 5, 1, 0.00f, 1.6f, 200, 480, 0.20f, 20, gm::WEAPON_RIFLE},    // soldier
+    {310, 360,  60, 14, 0.35f, 0.65f, 800, 3, 1, 0.00f, 1.2f, 140, 300, 0.35f, 25, gm::WEAPON_RIFLE},    // runner
+    {150, 180, 220, 25, 1.20f, 1.80f, 620, 4, 5, 0.50f, 0.7f, 160, 300, 0.05f,  6, gm::WEAPON_SHOTGUN},  // heavy
+};
+
+// ---- difficulty (index = gm::Difficulty) ------------------------------------------------
+struct DifficultyDef {
+    const char* name;
+    float speed;      // bot movement speed multiplier
+    float fireDelay;  // bot fire delay multiplier
+    float aimError;   // bot aim error multiplier
+    float damage;     // bot damage multiplier
+    float reaction;   // bot reaction time multiplier
+};
+const DifficultyDef kDifficulties[3] = {
+    {"Easy",   0.85f, 1.40f, 1.6f, 0.6f, 1.4f},
+    {"Normal", 1.00f, 1.00f, 1.0f, 1.0f, 1.0f},
+    {"Hard",   1.12f, 0.75f, 0.6f, 1.4f, 0.7f},
+};
 
 const char* const kBotNames[] = {
     "Viper",  "Ghost",  "Rook",   "Blaze",  "Nova",   "Frost",  "Havoc",  "Jinx",
@@ -103,9 +147,26 @@ bool SegmentVsCircle(Vec2f p0, Vec2f p1, Vec2f center, float radius, float& tOut
 
 }  // namespace
 
+const WeaponDef& GetWeaponDef(uint32_t weapon) {
+    return kWeapons[weapon < gm::kWeaponCount ? weapon : 0];
+}
+
+const char* DifficultyName(uint32_t d) { return kDifficulties[d < 3 ? d : 1].name; }
+
+const char* KindName(uint32_t kind) {
+    switch (kind) {
+        case gm::KIND_PLAYER:  return "Player";
+        case gm::KIND_SOLDIER: return "Soldier";
+        case gm::KIND_RUNNER:  return "Runner";
+        case gm::KIND_HEAVY:   return "Heavy";
+        default:               return "?";
+    }
+}
+
 // =============================================================================
 
 Game::Game(gm::GameMemory& mem, uint32_t seed) : mem_(mem), rng_(seed) {
+    mem_.difficulty = gm::DIFFICULTY_NORMAL;
     BuildArena();
     Reset();
 }
@@ -117,6 +178,14 @@ float Game::RandF(float lo, float hi) {
 int Game::RandI(int lo, int hi) {
     return std::uniform_int_distribution<int>(lo, hi)(rng_);
 }
+
+std::vector<GameEvent> Game::TakeEvents() {
+    std::vector<GameEvent> out;
+    out.swap(events_);
+    return out;
+}
+
+void Game::SetDifficulty(uint32_t d) { mem_.difficulty = d > gm::DIFFICULTY_HARD ? gm::DIFFICULTY_NORMAL : d; }
 
 void Game::BuildArena() {
     mem_.arenaSize = {kArenaW, kArenaH};
@@ -137,6 +206,19 @@ void Game::BuildArena() {
         if (mem_.obstacleCount >= static_cast<uint32_t>(gm::kMaxObstacles)) break;
         mem_.obstacles[mem_.obstacleCount++] = o;
     }
+
+    // Health packs at fixed spots.
+    const Vec2f packs[] = {
+        {1200, 200}, {1200, 1400}, {300, 800}, {2100, 800}, {640, 640}, {1760, 960},
+    };
+    std::memset(mem_.pickups, 0, sizeof(mem_.pickups));
+    int i = 0;
+    for (Vec2f p : packs) {
+        mem_.pickups[i].pos = p;
+        mem_.pickups[i].type = gm::PICKUP_HEALTH;
+        mem_.pickups[i].available = 1;
+        ++i;
+    }
 }
 
 void Game::Reset() {
@@ -144,10 +226,17 @@ void Game::Reset() {
     effects_.clear();
     texts_.clear();
     killFeed_.clear();
+    events_.clear();
     shotsFired = shotsHit = 0;
+    killStreak_ = multiKill_ = 0;
+    announcement_ = Announcement{};
 
     mem_.localPlayerIndex = 0;
-    mem_.bulletSpeed = kPlayerBulletSpeed;
+
+    for (int i = 0; i < gm::kMaxPickups; ++i) {
+        pickupTimers_[i] = 0.0f;
+        if (mem_.pickups[i].pos.x != 0.0f || mem_.pickups[i].pos.y != 0.0f) mem_.pickups[i].available = 1;
+    }
 
     for (int i = 0; i < gm::kMaxEntities; ++i) {
         gm::Entity& e = mem_.entities[i];
@@ -158,7 +247,11 @@ void Game::Reset() {
     }
 
     // Player first, then bots (bots spawn far away from the player).
-    mem_.entities[0].active = 1;
+    gm::Entity& p = mem_.entities[0];
+    p.active = 1;
+    p.kind = gm::KIND_PLAYER;
+    p.weapon = gm::WEAPON_RIFLE;
+    for (int w = 0; w < gm::kWeaponCount; ++w) playerAmmo_[w] = kWeapons[w].magSize;
     SpawnEntity(0);
     SetBotCount(botCount_);
 }
@@ -224,26 +317,43 @@ void Game::SpawnEntity(int slot) {
 
     e.id           = nextId_++;
     e.alive        = 1;
-    e.maxHealth    = isPlayer ? kPlayerMaxHealth : kBotMaxHealth;
-    e.health       = e.maxHealth;
-    e.radius       = isPlayer ? kPlayerRadius : kBotRadius;
     e.pos          = FindSpawnPoint(!isPlayer);
     e.vel          = {0, 0};
     e.aimAngle     = RandF(-kPi, kPi);
     e.respawnTimer = 0.0f;
+    e.reloadTimer  = 0.0f;
     e.visible      = 0;
+    hitFlash_[slot] = 0.0f;
 
-    if (!isPlayer) {
+    if (isPlayer) {
+        e.kind      = gm::KIND_PLAYER;
+        e.maxHealth = kPlayerMaxHealth;
+        e.radius    = kPlayerRadius;
+        for (int w = 0; w < gm::kWeaponCount; ++w) playerAmmo_[w] = kWeapons[w].magSize;
+        e.ammo = playerAmmo_[e.weapon];
+        playerFireCooldown_ = 0.0f;
+        spawnProtection_ = kSpawnProtection;
+        killStreak_ = 0;
+        Emit(GameEventType::Respawn, e.pos);
+    } else {
+        // Pick a bot type: 60% soldier, 25% runner, 15% heavy.
+        float r = RandF(0, 1);
+        e.kind = r < 0.60f ? gm::KIND_SOLDIER : (r < 0.85f ? gm::KIND_RUNNER : gm::KIND_HEAVY);
+        const BotKindDef& k = kBotKinds[e.kind];
+        e.maxHealth = k.health;
+        e.radius    = k.radius;
+        e.weapon    = k.weapon;
+        e.ammo      = k.magSize;
+
         BotBrain& b = brains_[slot];
         b = BotBrain{};
-        b.baseSpeed     = RandF(220.0f, 270.0f);
+        b.baseSpeed     = RandF(k.speedMin, k.speedMax);
         b.strafeDir     = RandF(0, 1) < 0.5f ? -1.0f : 1.0f;
-        b.preferredDist = RandF(220.0f, 480.0f);
+        b.preferredDist = RandF(k.distMin, k.distMax);
         b.fireCooldown  = RandF(0.5f, 1.2f);
         b.wanderTarget  = FindSpawnPoint(false);
-    } else {
-        playerFireCooldown_ = 0.0f;
     }
+    e.health = e.maxHealth;
 }
 
 // -----------------------------------------------------------------------------
@@ -293,6 +403,21 @@ bool Game::LineOfSight(Vec2f a, Vec2f b) const {
     return true;
 }
 
+int Game::NearestPickup(Vec2f from, float maxDist) const {
+    int best = -1;
+    float bestDist = maxDist;
+    for (int i = 0; i < gm::kMaxPickups; ++i) {
+        const gm::Pickup& p = mem_.pickups[i];
+        if (!p.available) continue;
+        float d = Distance(from, p.pos);
+        if (d < bestDist) {
+            bestDist = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
 // -----------------------------------------------------------------------------
 //  Main tick
 // -----------------------------------------------------------------------------
@@ -307,12 +432,17 @@ void Game::Tick(const PlayerInput& input) {
         if (e.active && e.alive) UpdateBot(i, dt);
     }
     UpdateBullets(dt);
+    UpdatePickups(dt);
     UpdateRespawns(dt);
     UpdateEffects(dt);
     UpdateVisibility();
 
-    hitMarker_   = std::max(0.0f, hitMarker_ - dt);
-    damageFlash_ = std::max(0.0f, damageFlash_ - dt);
+    hitMarker_       = std::max(0.0f, hitMarker_ - dt);
+    damageFlash_     = std::max(0.0f, damageFlash_ - dt);
+    spawnProtection_ = std::max(0.0f, spawnProtection_ - dt);
+    multiKillTimer_  = std::max(0.0f, multiKillTimer_ - dt);
+    announcement_.time += dt;
+    for (float& f : hitFlash_) f = std::max(0.0f, f - dt);
 }
 
 void Game::UpdateVisibility() {
@@ -329,6 +459,32 @@ void Game::UpdatePlayer(const PlayerInput& input, float dt) {
     playerFireCooldown_ -= dt;
     if (!p.alive) return;
 
+    // ---- weapon switching ----------------------------------------------------
+    if (input.selectWeapon >= 0 && input.selectWeapon < gm::kWeaponCount &&
+        static_cast<uint32_t>(input.selectWeapon) != p.weapon) {
+        p.weapon = static_cast<uint32_t>(input.selectWeapon);
+        p.reloadTimer = 0.0f;  // switching cancels a reload
+        playerFireCooldown_ = std::max(playerFireCooldown_, 0.25f);
+        Emit(GameEventType::WeaponSwitch, p.pos, p.weapon);
+    }
+    const WeaponDef& w = kWeapons[p.weapon];
+    mem_.bulletSpeed = w.bulletSpeed;  // <- the aimbot uses this for prediction
+
+    // ---- reloading ----------------------------------------------------------------
+    int& ammo = playerAmmo_[p.weapon];
+    if (p.reloadTimer > 0.0f) {
+        p.reloadTimer -= dt;
+        if (p.reloadTimer <= 0.0f) {
+            p.reloadTimer = 0.0f;
+            ammo = w.magSize;
+            Emit(GameEventType::ReloadDone, p.pos, p.weapon);
+        }
+    } else if (input.reload && ammo < w.magSize) {
+        p.reloadTimer = w.reloadTime;
+        Emit(GameEventType::Reload, p.pos, p.weapon);
+    }
+
+    // ---- movement -------------------------------------------------------------------
     Vec2f wish = Normalize(input.move) * kPlayerSpeed;
     p.vel = MoveTowards(p.vel, wish, kPlayerAccel * dt);
     Vec2f moved = MoveCircle(p.pos, p.vel * dt, p.radius);
@@ -338,16 +494,35 @@ void Game::UpdatePlayer(const PlayerInput& input, float dt) {
     Vec2f toAim = input.aimWorld - p.pos;
     if (LengthSq(toAim) > 1.0f) p.aimAngle = AngleOf(toAim);
 
-    if (input.shoot && playerFireCooldown_ <= 0.0f) {
-        FireBullet(0, p.aimAngle, kPlayerBulletSpeed, kPlayerDamage);
-        playerFireCooldown_ = kPlayerFireDelay;
-        ++shotsFired;
+    // ---- shooting --------------------------------------------------------------------
+    if (input.shoot && playerFireCooldown_ <= 0.0f && p.reloadTimer <= 0.0f) {
+        if (ammo > 0) {
+            FireBullets(0, p.aimAngle, w.bulletSpeed, w.damage, w.pellets, w.spread, w.bulletLife,
+                        p.weapon == gm::WEAPON_SNIPER);
+            --ammo;
+            playerFireCooldown_ = w.fireDelay;
+            spawnProtection_ = 0.0f;  // shooting ends spawn protection
+            ++shotsFired;
+            Emit(GameEventType::PlayerShot, p.pos, p.weapon);
+            if (ammo == 0) {  // auto reload
+                p.reloadTimer = w.reloadTime;
+                Emit(GameEventType::Reload, p.pos, p.weapon);
+            }
+        } else {
+            playerFireCooldown_ = 0.25f;
+            Emit(GameEventType::Empty, p.pos, p.weapon);
+            p.reloadTimer = w.reloadTime;
+            Emit(GameEventType::Reload, p.pos, p.weapon);
+        }
     }
+    p.ammo = ammo;
 }
 
 void Game::UpdateBot(int slot, float dt) {
     gm::Entity& bot = mem_.entities[slot];
     BotBrain&   b   = brains_[slot];
+    const BotKindDef& kind = kBotKinds[bot.kind <= gm::KIND_HEAVY ? bot.kind : gm::KIND_SOLDIER];
+    const DifficultyDef& diff = kDifficulties[mem_.difficulty <= 2 ? mem_.difficulty : 1];
     const gm::Entity& player = Player();
 
     b.decisionTimer -= dt;
@@ -357,26 +532,38 @@ void Game::UpdateBot(int slot, float dt) {
     b.reaction      -= dt;
     b.lastSeenTimer += dt;
 
+    if (bot.reloadTimer > 0.0f) {
+        bot.reloadTimer -= dt;
+        if (bot.reloadTimer <= 0.0f) {
+            bot.reloadTimer = 0.0f;
+            bot.ammo = kind.magSize;
+        }
+    }
+
     Vec2f toPlayer = player.pos - bot.pos;
     float dist = Length(toPlayer);
     bool seesPlayer = player.alive && dist < kBotViewRange && LineOfSight(bot.pos, player.pos);
     if (seesPlayer) {
-        if (b.lastSeenTimer > 1.0f) b.reaction = RandF(0.25f, 0.5f);  // just spotted
+        if (b.lastSeenTimer > 1.0f) b.reaction = RandF(0.25f, 0.5f) * diff.reaction;  // just spotted
         b.lastSeenTimer = 0.0f;
         b.lastSeenPos = player.pos;
     }
     bool engaging = player.alive && b.lastSeenTimer < 3.0f;
 
+    // Low on health? Go for a health pack.
+    int pack = -1;
+    if (bot.health < bot.maxHealth * 45 / 100) pack = NearestPickup(bot.pos, 1000.0f);
+
     // ---- movement decision -------------------------------------------------
     if (b.decisionTimer <= 0.0f) {
         b.decisionTimer = RandF(0.25f, 0.8f);
         if (RandF(0, 1) < 0.65f) b.strafeDir = -b.strafeDir;  // change direction a lot
-        b.preferredDist = RandF(200.0f, 480.0f);
+        b.preferredDist = RandF(kind.distMin, kind.distMax);
         b.jitterAngle   = RandF(-0.6f, 0.6f);
 
         // Is the player aiming at us? -> more likely to dodge with a dash.
         float aimDiff = std::fabs(WrapAngle(player.aimAngle - AngleOf(bot.pos - player.pos)));
-        float dashChance = (seesPlayer && aimDiff < 0.2f) ? 0.55f : 0.2f;
+        float dashChance = (seesPlayer && aimDiff < 0.2f) ? kind.dashChance + 0.35f : kind.dashChance;
         if (b.dashCooldown <= 0.0f && RandF(0, 1) < dashChance) {
             b.dashTimer    = RandF(0.15f, 0.3f);
             b.dashCooldown = RandF(0.8f, 1.6f);
@@ -387,14 +574,20 @@ void Game::UpdateBot(int slot, float dt) {
     }
 
     Vec2f desired{0, 0};
-    if (engaging) {
+    if (pack >= 0) {
+        // Run to the health pack (still shooting if the player is visible).
+        Vec2f to = mem_.pickups[pack].pos - bot.pos;
+        desired = Normalize(Rotate(to, b.jitterAngle * 0.3f));
+    } else if (engaging) {
         Vec2f target = seesPlayer ? player.pos : b.lastSeenPos;
         Vec2f to = target - bot.pos;
         float d = Length(to);
         Vec2f dir = Normalize(to);
         if (seesPlayer) {
             // Circle around the player at the preferred distance.
-            float radial = Clampf((d - b.preferredDist) / 150.0f, -1.0f, 1.0f);
+            // While reloading, back off a bit.
+            float wanted = b.preferredDist + (bot.reloadTimer > 0.0f ? 200.0f : 0.0f);
+            float radial = Clampf((d - wanted) / 150.0f, -1.0f, 1.0f);
             Vec2f tangent = Perp(dir) * b.strafeDir;
             desired = Normalize(Rotate(dir * radial + tangent, b.jitterAngle));
         } else {
@@ -412,11 +605,12 @@ void Game::UpdateBot(int slot, float dt) {
         if (!o.active || !o.alive) continue;
         Vec2f away = bot.pos - o.pos;
         float d = Length(away);
-        if (d < 70.0f && d > 1e-3f) desired += away / d * ((70.0f - d) / 70.0f) * 1.5f;
+        float minDist = bot.radius + o.radius + 34.0f;
+        if (d < minDist && d > 1e-3f) desired += away / d * ((minDist - d) / minDist) * 1.5f;
     }
     desired = Normalize(desired);
 
-    float speed = b.baseSpeed * (b.dashTimer > 0.0f ? 2.3f : 1.0f);
+    float speed = b.baseSpeed * diff.speed * (b.dashTimer > 0.0f ? 2.3f : 1.0f);
     if (botsFrozen) speed = 0.0f;
 
     bot.vel = MoveTowards(bot.vel, desired * speed, kBotAccel * dt);
@@ -442,7 +636,7 @@ void Game::UpdateBot(int slot, float dt) {
     float targetAngle;
     if (seesPlayer) {
         // Bots lead their shots a little (imperfectly).
-        float t = dist / kBotBulletSpeed * RandF(0.3f, 0.8f);
+        float t = dist / kind.bulletSpeed * RandF(0.3f, 0.8f);
         Vec2f aimPoint = player.pos + player.vel * t;
         targetAngle = AngleOf(aimPoint - bot.pos) + b.aimError;
     } else if (LengthSq(bot.vel) > 100.0f) {
@@ -453,34 +647,48 @@ void Game::UpdateBot(int slot, float dt) {
     bot.aimAngle = RotateTowards(bot.aimAngle, targetAngle, kBotTurnSpeed * dt);
 
     bool aimedWell = std::fabs(WrapAngle(targetAngle - bot.aimAngle)) < 0.15f;
-    if (seesPlayer && !botsPeaceful && b.reaction <= 0.0f && b.fireCooldown <= 0.0f && aimedWell) {
-        FireBullet(slot, bot.aimAngle, kBotBulletSpeed, kBotDamage);
-        b.fireCooldown = RandF(0.55f, 1.1f);
-        b.aimError     = RandF(-0.12f, 0.12f);
+    bool inRange = dist < kind.bulletSpeed * kind.bulletLife * 0.9f;
+    if (seesPlayer && inRange && !botsPeaceful && b.reaction <= 0.0f && b.fireCooldown <= 0.0f && aimedWell &&
+        bot.reloadTimer <= 0.0f && bot.ammo > 0) {
+        int damage = std::max(1, static_cast<int>(std::lround(kind.damage * diff.damage)));
+        FireBullets(slot, bot.aimAngle, kind.bulletSpeed, damage, kind.pellets, kind.spread, kind.bulletLife, false);
+        Emit(GameEventType::Shot, bot.pos, bot.weapon);
+        b.fireCooldown = RandF(kind.fireMin, kind.fireMax) * diff.fireDelay;
+        b.aimError     = RandF(-0.12f, 0.12f) * diff.aimError;
+        if (--bot.ammo <= 0) bot.reloadTimer = kBotReload;
     }
 }
 
-void Game::FireBullet(int slot, float angle, float speed, int damage) {
+void Game::FireBullets(int slot, float angle, float speed, int damage, int pellets, float spread,
+                       float life, bool heavy) {
     const gm::Entity& e = mem_.entities[slot];
-    Bullet bl;
-    bl.active  = true;
-    Vec2f dir  = FromAngle(angle);
-    // Spawn at the center so bullets can not start inside a wall; they
-    // can not hit the shooter (owner check).
-    bl.pos     = e.pos;
-    bl.prevPos = e.pos;
-    bl.vel     = dir * speed;
-    bl.life    = kBulletLife;
-    bl.owner   = slot;
-    bl.team    = e.team;
-    bl.damage  = damage;
+    for (int i = 0; i < pellets; ++i) {
+        float a = angle;
+        if (pellets > 1) a += spread * (static_cast<float>(i) / (pellets - 1) - 0.5f) + RandF(-0.03f, 0.03f);
+        else if (spread > 0.0f) a += RandF(-spread * 0.5f, spread * 0.5f);
 
-    // Reuse a free slot if there is one.
-    auto it = std::find_if(bullets_.begin(), bullets_.end(), [](const Bullet& x) { return !x.active; });
-    if (it != bullets_.end()) *it = bl;
-    else bullets_.push_back(bl);
+        Bullet bl;
+        bl.active  = true;
+        Vec2f dir  = FromAngle(a);
+        // Spawn at the center so bullets can not start inside a wall; they
+        // can not hit the shooter (owner check).
+        bl.pos     = e.pos;
+        bl.prevPos = e.pos;
+        bl.vel     = dir * speed * (pellets > 1 ? RandF(0.9f, 1.05f) : 1.0f);
+        bl.life    = life;
+        bl.owner   = slot;
+        bl.team    = e.team;
+        bl.damage  = damage;
+        bl.heavy   = heavy;
 
-    effects_.push_back({EffectType::Muzzle, e.pos + dir * (e.radius + 8.0f), angle, 0.0f, 0.06f, e.team});
+        // Reuse a free slot if there is one.
+        auto it = std::find_if(bullets_.begin(), bullets_.end(), [](const Bullet& x) { return !x.active; });
+        if (it != bullets_.end()) *it = bl;
+        else bullets_.push_back(bl);
+    }
+    Vec2f dir = FromAngle(angle);
+    effects_.push_back({EffectType::Muzzle, e.pos + dir * (e.radius + 8.0f), angle, 0.0f,
+                        heavy ? 0.1f : 0.06f, e.team, heavy ? 16.0f : 9.0f});
 }
 
 void Game::UpdateBullets(float dt) {
@@ -520,6 +728,7 @@ void Game::UpdateBullets(float dt) {
                 ApplyDamage(hitEntity, bl.owner, bl.damage, hitPos, angle);
             } else {
                 effects_.push_back({EffectType::Spark, hitPos, angle, 0.0f, 0.25f, bl.team});
+                if (bl.team == gm::TEAM_PLAYER) Emit(GameEventType::WallHit, hitPos);
             }
             bl.pos = hitPos;
             bl.active = false;
@@ -531,20 +740,30 @@ void Game::UpdateBullets(float dt) {
     }
 }
 
+void Game::Announce(const std::string& text) {
+    announcement_.text = text;
+    announcement_.time = 0.0f;
+}
+
 void Game::ApplyDamage(int victim, int attacker, int damage, Vec2f hitPos, float angle) {
     gm::Entity& v = mem_.entities[victim];
     bool victimIsPlayer = victim == static_cast<int>(mem_.localPlayerIndex);
     bool attackerIsPlayer = attacker == static_cast<int>(mem_.localPlayerIndex);
 
-    if (victimIsPlayer && godMode) damage = 0;
+    if (victimIsPlayer && (godMode || spawnProtection_ > 0.0f)) damage = 0;
 
     effects_.push_back({EffectType::Blood, hitPos, angle, 0.0f, 0.3f, v.team});
+    hitFlash_[victim] = 0.1f;
     if (attackerIsPlayer) {
         ++shotsHit;
         hitMarker_ = 0.15f;
         texts_.push_back({hitPos, 0.0f, damage});
+        Emit(GameEventType::PlayerHitEnemy, hitPos);
     }
-    if (victimIsPlayer && damage > 0) damageFlash_ = 0.25f;
+    if (victimIsPlayer && damage > 0) {
+        damageFlash_ = 0.25f;
+        Emit(GameEventType::PlayerHurt, hitPos);
+    }
 
     v.health -= damage;
     if (v.health > 0) return;
@@ -553,14 +772,58 @@ void Game::ApplyDamage(int victim, int attacker, int damage, Vec2f hitPos, float
     v.health = 0;
     v.alive = 0;
     v.vel = {0, 0};
+    v.reloadTimer = 0.0f;
     v.deaths++;
     v.respawnTimer = victimIsPlayer ? kPlayerRespawn : kBotRespawn;
     if (attacker >= 0) mem_.entities[attacker].kills++;
-    effects_.push_back({EffectType::Death, v.pos, angle, 0.0f, 0.6f, v.team});
+    effects_.push_back({EffectType::Death, v.pos, angle, 0.0f, 0.6f, v.team, v.radius});
+    effects_.push_back({EffectType::Corpse, v.pos, angle, 0.0f, 8.0f, v.team, v.radius});
+    Emit(victimIsPlayer ? GameEventType::PlayerDied : (attackerIsPlayer ? GameEventType::PlayerKill
+                                                                         : GameEventType::Kill),
+         v.pos);
 
     std::string attackerName = attacker >= 0 ? mem_.entities[attacker].name : "?";
     killFeed_.push_back({attackerName + "  >  " + v.name, 0.0f, victimIsPlayer || attackerIsPlayer});
     if (killFeed_.size() > 6) killFeed_.erase(killFeed_.begin());
+
+    if (victimIsPlayer) {
+        killStreak_ = 0;
+        multiKill_ = 0;
+    } else if (attackerIsPlayer) {
+        ++killStreak_;
+        multiKill_ = multiKillTimer_ > 0.0f ? multiKill_ + 1 : 1;
+        multiKillTimer_ = 3.0f;
+        if (multiKill_ == 2) Announce("DOUBLE KILL");
+        else if (multiKill_ == 3) Announce("TRIPLE KILL");
+        else if (multiKill_ >= 4) Announce("RAMPAGE");
+        else if (killStreak_ == 5) Announce("KILLING SPREE");
+        else if (killStreak_ == 10) Announce("UNSTOPPABLE");
+        else if (killStreak_ == 15) Announce("GODLIKE");
+        else if (killStreak_ > 15 && killStreak_ % 5 == 0) Announce(std::to_string(killStreak_) + " KILL STREAK");
+    }
+}
+
+void Game::UpdatePickups(float dt) {
+    for (int i = 0; i < gm::kMaxPickups; ++i) {
+        gm::Pickup& p = mem_.pickups[i];
+        if (p.pos.x == 0.0f && p.pos.y == 0.0f) continue;  // unused slot
+        if (!p.available) {
+            pickupTimers_[i] -= dt;
+            if (pickupTimers_[i] <= 0.0f) p.available = 1;
+            continue;
+        }
+        for (int e = 0; e < gm::kMaxEntities; ++e) {
+            gm::Entity& ent = mem_.entities[e];
+            if (!ent.active || !ent.alive || ent.health >= ent.maxHealth) continue;
+            if (Distance(ent.pos, p.pos) > ent.radius + kPickupRadius) continue;
+            ent.health = std::min(ent.maxHealth, ent.health + kHealthPackAmount * ent.maxHealth / 100);
+            p.available = 0;
+            pickupTimers_[i] = kHealthPackRespawn;
+            effects_.push_back({EffectType::Pickup, p.pos, 0.0f, 0.0f, 0.5f, ent.team});
+            if (e == static_cast<int>(mem_.localPlayerIndex)) Emit(GameEventType::Pickup, p.pos);
+            break;
+        }
+    }
 }
 
 void Game::UpdateRespawns(float dt) {

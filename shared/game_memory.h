@@ -42,15 +42,42 @@ namespace gm {
 // 15 characters + terminating zero = 16 bytes.
 #define GM_MAGIC_STRING "ARENA_SHOOTER!!"
 constexpr char     kMagic[16]     = GM_MAGIC_STRING;
-constexpr uint32_t kLayoutVersion = 1;
+constexpr uint32_t kLayoutVersion = 2;
 
 constexpr int kMaxEntities  = 32;  // slot 0 = local player, 1..31 = bots
 constexpr int kMaxObstacles = 32;
+constexpr int kMaxPickups   = 16;
 constexpr int kNameLength   = 16;
 
 enum Team : uint32_t {
     TEAM_PLAYER = 0,
     TEAM_BOTS   = 1,
+};
+
+// What kind of entity (Entity::kind).
+enum EntityKind : uint32_t {
+    KIND_PLAYER  = 0,
+    KIND_SOLDIER = 1,  // normal bot
+    KIND_RUNNER  = 2,  // fast, small, weak
+    KIND_HEAVY   = 3,  // slow, big, lots of health, shotgun
+};
+
+// Weapons (Entity::weapon). Every weapon has its own bullet speed.
+enum WeaponId : uint32_t {
+    WEAPON_RIFLE   = 0,
+    WEAPON_SHOTGUN = 1,
+    WEAPON_SNIPER  = 2,
+};
+constexpr int kWeaponCount = 3;
+
+enum Difficulty : uint32_t {
+    DIFFICULTY_EASY   = 0,
+    DIFFICULTY_NORMAL = 1,
+    DIFFICULTY_HARD   = 2,
+};
+
+enum PickupType : uint32_t {
+    PICKUP_HEALTH = 0,
 };
 
 // Bits of GameMemory::buttons (mouse buttons currently held in the game).
@@ -82,7 +109,10 @@ struct Entity {
     int32_t  deaths;         // 0x38
     float    respawnTimer;   // 0x3C  seconds until respawn (when dead)
     char     name[kNameLength]; // 0x40  zero terminated
-    uint8_t  _pad[0x10];     // 0x50  reserved
+    uint32_t weapon;         // 0x50  gm::WeaponId currently held
+    int32_t  ammo;           // 0x54  rounds left in the magazine
+    float    reloadTimer;    // 0x58  > 0 while reloading (seconds left)
+    uint32_t kind;           // 0x5C  gm::EntityKind
 };
 
 // Axis aligned wall / crate. Size: 0x10 bytes.
@@ -93,7 +123,14 @@ struct Obstacle {
     float h;                 // 0x0C
 };
 
-// The global game state. Size: 0xE80 bytes.
+// Health pack etc. lying in the arena. Size: 0x10 bytes.
+struct Pickup {
+    Vec2f    pos;            // 0x00  world position (center)
+    uint32_t type;           // 0x08  gm::PickupType
+    uint32_t available;      // 0x0C  1 = can be picked up, 0 = respawning / unused
+};
+
+// The global game state. Size: 0xF80 bytes.
 struct GameMemory {
     // ---- header ----------------------------------------------------------
     char     magic[16];          // 0x000  "ARENA_SHOOTER!!"
@@ -121,19 +158,22 @@ struct GameMemory {
 
     // ---- world ------------------------------------------------------------
     Vec2f    arenaSize;          // 0x068  arena is [0,0] .. arenaSize
-    float    bulletSpeed;        // 0x070  local player's bullet speed (units/s)
+    float    bulletSpeed;        // 0x070  bullet speed of the local player's CURRENT weapon (units/s)
     uint32_t obstacleCount;      // 0x074
-    uint8_t  _reserved[0x08];    // 0x078
+    uint32_t difficulty;         // 0x078  gm::Difficulty
+    uint32_t fogOfWar;           // 0x07C  1 = hidden enemies are not drawn
 
     Entity   entities[kMaxEntities];    // 0x080  32 * 0x60 = 0xC00
     Obstacle obstacles[kMaxObstacles];  // 0xC80  32 * 0x10 = 0x200
-};                                      // 0xE80  end
+    Pickup   pickups[kMaxPickups];      // 0xE80  16 * 0x10 = 0x100
+};                                      // 0xF80  end
 
 // ---- layout checks (compile error if anything moves) ------------------------
 static_assert(sizeof(Vec2f) == 0x08, "Vec2f size");
 static_assert(sizeof(Entity) == 0x60, "Entity size");
 static_assert(sizeof(Obstacle) == 0x10, "Obstacle size");
-static_assert(sizeof(GameMemory) == 0xE80, "GameMemory size");
+static_assert(sizeof(Pickup) == 0x10, "Pickup size");
+static_assert(sizeof(GameMemory) == 0xF80, "GameMemory size");
 
 static_assert(offsetof(Entity, id) == 0x00, "");
 static_assert(offsetof(Entity, active) == 0x04, "");
@@ -150,6 +190,10 @@ static_assert(offsetof(Entity, kills) == 0x34, "");
 static_assert(offsetof(Entity, deaths) == 0x38, "");
 static_assert(offsetof(Entity, respawnTimer) == 0x3C, "");
 static_assert(offsetof(Entity, name) == 0x40, "");
+static_assert(offsetof(Entity, weapon) == 0x50, "");
+static_assert(offsetof(Entity, ammo) == 0x54, "");
+static_assert(offsetof(Entity, reloadTimer) == 0x58, "");
+static_assert(offsetof(Entity, kind) == 0x5C, "");
 
 static_assert(offsetof(GameMemory, magic) == 0x000, "");
 static_assert(offsetof(GameMemory, layoutVersion) == 0x010, "");
@@ -172,8 +216,11 @@ static_assert(offsetof(GameMemory, paused) == 0x064, "");
 static_assert(offsetof(GameMemory, arenaSize) == 0x068, "");
 static_assert(offsetof(GameMemory, bulletSpeed) == 0x070, "");
 static_assert(offsetof(GameMemory, obstacleCount) == 0x074, "");
+static_assert(offsetof(GameMemory, difficulty) == 0x078, "");
+static_assert(offsetof(GameMemory, fogOfWar) == 0x07C, "");
 static_assert(offsetof(GameMemory, entities) == 0x080, "");
 static_assert(offsetof(GameMemory, obstacles) == 0xC80, "");
+static_assert(offsetof(GameMemory, pickups) == 0xE80, "");
 
 // ---- helpers ------------------------------------------------------------------
 

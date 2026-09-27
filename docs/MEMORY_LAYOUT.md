@@ -1,4 +1,4 @@
-# Memory layout (layout version 1)
+# Memory layout (layout version 2)
 
 Source of truth: [`shared/game_memory.h`](../shared/game_memory.h). Every offset
 below is checked there with `static_assert`, so these tables can't silently
@@ -22,13 +22,13 @@ g_game = moduleBase("shooter.exe") + RVA
 `SizeOfImage` comes from the PE header: `e_lfanew = *(i32*)(base + 0x3C)`, then
 `SizeOfImage = *(u32*)(base + e_lfanew + 0x50)`.
 
-## `GameMemory` (size 0xE80)
+## `GameMemory` (size 0xF80)
 
 | Offset | Type | Name | Notes |
 |---:|---|---|---|
 | 0x000 | char[16] | `magic` | `"ARENA_SHOOTER!!"` |
-| 0x010 | u32 | `layoutVersion` | 1 |
-| 0x014 | u32 | `structSize` | 0xE80 |
+| 0x010 | u32 | `layoutVersion` | 2 |
+| 0x014 | u32 | `structSize` | 0xF80 |
 | 0x018 | u64 | `selfAddress` | address of `g_game` itself |
 | 0x020 | u32 | `frameCount` | +1 per rendered frame |
 | 0x024 | f32 | `gameTime` | seconds |
@@ -45,11 +45,13 @@ g_game = moduleBase("shooter.exe") + RVA
 | 0x060 | u32 | `buttons` | bit0 left, bit1 right, bit2 middle |
 | 0x064 | u32 | `paused` | |
 | 0x068 | vec2 | `arenaSize` | 2400 × 1600 |
-| 0x070 | f32 | `bulletSpeed` | 1300 (player bullets) |
+| 0x070 | f32 | `bulletSpeed` | bullet speed of the player's current weapon (1300 / 1000 / 2600) |
 | 0x074 | u32 | `obstacleCount` | |
-| 0x078 | u8[8] | reserved | |
+| 0x078 | u32 | `difficulty` | 0 easy, 1 normal, 2 hard |
+| 0x07C | u32 | `fogOfWar` | 1 = enemies without line of sight are not drawn |
 | 0x080 | Entity[32] | `entities` | stride 0x60 |
 | 0xC80 | Obstacle[32] | `obstacles` | stride 0x10 |
+| 0xE80 | Pickup[16] | `pickups` | stride 0x10 |
 
 ## `Entity` (size 0x60)
 
@@ -62,17 +64,20 @@ g_game = moduleBase("shooter.exe") + RVA
 | 0x08 | u32 | `alive` | |
 | 0x0C | u32 | `team` | 0 = player, 1 = bots |
 | 0x10 | i32 | `health` | |
-| 0x14 | i32 | `maxHealth` | 100 |
+| 0x14 | i32 | `maxHealth` | player/soldier 100, runner 60, heavy 220 |
 | 0x18 | vec2 | `pos` | world position (center) |
 | 0x20 | vec2 | `vel` | units / second |
 | 0x28 | f32 | `aimAngle` | radians, 0 = right, π/2 = down |
-| 0x2C | f32 | `radius` | 18 |
+| 0x2C | f32 | `radius` | player/soldier 18, runner 14, heavy 25 |
 | 0x30 | u32 | `visible` | line of sight from the local player |
 | 0x34 | i32 | `kills` | |
 | 0x38 | i32 | `deaths` | |
 | 0x3C | f32 | `respawnTimer` | |
 | 0x40 | char[16] | `name` | |
-| 0x50 | u8[16] | reserved | |
+| 0x50 | u32 | `weapon` | 0 rifle, 1 shotgun, 2 sniper |
+| 0x54 | i32 | `ammo` | rounds left in the magazine |
+| 0x58 | f32 | `reloadTimer` | > 0 while reloading (seconds left) |
+| 0x5C | u32 | `kind` | 0 player, 1 soldier, 2 runner, 3 heavy |
 
 ## `Obstacle` (size 0x10)
 
@@ -82,6 +87,16 @@ g_game = moduleBase("shooter.exe") + RVA
 | 0x04 | f32 | `y` |
 | 0x08 | f32 | `w` |
 | 0x0C | f32 | `h` |
+
+## `Pickup` (size 0x10)
+
+`pickups[i]` is at `g_game + 0xE80 + i * 0x10`. Unused slots are all zero.
+
+| Offset | Type | Name | Notes |
+|---:|---|---|---|
+| 0x00 | vec2 | `pos` | world position |
+| 0x08 | u32 | `type` | 0 = health pack |
+| 0x0C | u32 | `available` | 0 while respawning |
 
 ## World → screen
 

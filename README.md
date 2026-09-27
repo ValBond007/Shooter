@@ -59,23 +59,52 @@ memory layout (addresses and offsets). The same text goes to `shooter_offsets.tx
 | WASD / arrows | move |
 | mouse | aim (the crosshair is the Windows cursor) |
 | left mouse | shoot |
+| `1` / `2` / `3` | rifle / shotgun / sniper |
+| `Q` | previous weapon |
+| `R` | reload |
 | mouse wheel | zoom |
+| `Tab` (hold) | scoreboard |
 | `+` / `-` | more / fewer bots (0-31) |
-| `R` | restart round |
 | `Esc` / `P` | pause |
+| `M` | sound on / off |
 | `H` | help |
 | **F1** | **memory debug overlay**: module base, `g_game` address, RVA, live entity table with addresses |
 | F2 | god mode |
 | F3 | freeze bots (static targets, good for testing) |
 | F4 | peaceful bots (they don't shoot) |
+| F5 | restart round |
+| F6 | difficulty: easy / normal / hard |
+| F7 | fog of war on / off |
 
 Command line: `shooter.exe --bots 12 --seed 123 --width 1600 --height 900`.
 `--print-offsets` prints the layout and exits.
 
+### Features
+
+- **3 weapons**, each with its own magazine and reload time:
+
+  | Weapon | Damage | Fire rate | Bullet speed | Magazine |
+  |---|---|---|---|---|
+  | Rifle | 25 | 9 / s | 1300 | 30 |
+  | Shotgun | 14 per pellet, 7 pellets | 1.25 / s | 1000 (short range) | 6 |
+  | Sniper | 100 | 0.9 / s | 2600 | 5 |
+
+- **3 bot types**: *Soldier* (normal), *Runner* (fast, small, 60 HP) and *Heavy*
+  (slow, big, 220 HP, shotgun). Bots strafe, change direction often, dash when
+  you aim at them, back off while reloading and go for health packs when hurt.
+- **Health packs** (+40 HP, back after 20 s).
+- **Fog of war**: walls cast shadows and enemies you can't see aren't drawn.
+  They are still in memory, so `aimbot radar` / `aimbot dump` show them. This is a
+  nice demo of what reading memory gives you.
+- Kill streaks (*DOUBLE KILL*, *KILLING SPREE*, …), scoreboard, 3 difficulty levels,
+  spawn protection, screen shake, hit flashes, corpses, generated sound effects
+  (no audio files needed).
+
 Game facts that matter for the aimbot:
-- the player's bullets fly at **1300 units/s** (it's also stored in memory, `bulletSpeed`)
-  and are not instant, so moving targets need **prediction**
-- bots strafe, change direction often and dash when you aim at them
+- bullets are not instant, so moving targets need **prediction**. The bullet speed of
+  the weapon you are holding is in memory (`bulletSpeed`), so the aimbot's prediction
+  is correct for every weapon.
+- bots move a lot, and Runners are fast
 - walls block bullets and line of sight (`Entity::visible`)
 
 ---
@@ -85,7 +114,7 @@ Game facts that matter for the aimbot:
 Everything is in **one global struct** in the game's `.data` section:
 
 ```cpp
-gm::GameMemory g_game;   // shared/game_memory.h, size 0xE80
+gm::GameMemory g_game;   // shared/game_memory.h, size 0xF80
 ```
 
 ```
@@ -96,6 +125,9 @@ g_game + 0x030  camTarget, camOffset, camZoom      (world -> screen)
 g_game + 0x050  mouseScreen, mouseWorld, buttons   (crosshair + mouse buttons)
 g_game + 0x080  entities[32]   (0x60 bytes each, [0] = you)
                   +0x08 alive  +0x0C team  +0x10 health  +0x18 pos  +0x20 vel  +0x30 visible
+                  +0x50 weapon  +0x54 ammo  +0x58 reloadTimer  +0x5C kind
+g_game + 0xC80  obstacles[32]  (walls)
+g_game + 0xE80  pickups[16]    (health packs)
 ```
 
 Two ways to find it:
@@ -130,7 +162,7 @@ Overrides: `--config other.ini`, `--memory winapi`, `--mouse none`, `--seconds 3
 Each new game frame:
 1. Checks whether you hold the aim key. The key is read from **the game's memory**
    (`buttons`), so the aimbot PC doesn't need your mouse. Default: right mouse button.
-2. Takes every enemy that is alive and visible.
+2. Takes every enemy that is alive, visible and on screen.
 3. Predicts where it will be when the bullet arrives: `pos + vel * distance / bulletSpeed`.
 4. Converts that to screen pixels with the camera from memory.
 5. Picks the one closest to the crosshair, inside `fov` pixels.

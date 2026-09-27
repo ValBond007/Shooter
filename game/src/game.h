@@ -13,10 +13,29 @@
 #include "vec2.h"
 
 struct PlayerInput {
-    Vec2f move{0, 0};      // desired move direction (WASD), any length
-    Vec2f aimWorld{0, 0};  // world position the player aims at (mouse)
-    bool  shoot = false;   // fire button held
+    Vec2f move{0, 0};       // desired move direction (WASD), any length
+    Vec2f aimWorld{0, 0};   // world position the player aims at (mouse)
+    bool  shoot = false;    // fire button held
+    bool  reload = false;   // reload key pressed this frame
+    int   selectWeapon = -1;  // 0..2 = switch weapon, -1 = no change
 };
+
+struct WeaponDef {
+    const char* name;
+    float fireDelay;    // seconds between shots
+    float bulletSpeed;  // units / second
+    int   damage;       // per pellet
+    int   pellets;      // bullets per shot
+    float spread;       // total spread angle (radians)
+    int   magSize;
+    float reloadTime;   // seconds
+    float bulletLife;   // seconds (range = speed * life)
+    float shake;        // screen shake strength when firing
+};
+
+const WeaponDef& GetWeaponDef(uint32_t weapon);
+const char* DifficultyName(uint32_t difficulty);
+const char* KindName(uint32_t kind);
 
 struct Bullet {
     bool     active = false;
@@ -27,6 +46,7 @@ struct Bullet {
     int      owner = -1;  // entity slot that fired it
     uint32_t team = 0;
     int      damage = 0;
+    bool     heavy = false;  // sniper round (drawn bigger)
 };
 
 struct BotBrain {
@@ -46,7 +66,7 @@ struct BotBrain {
     Vec2f wanderTarget{0, 0};
 };
 
-enum class EffectType { Spark, Blood, Death, Muzzle };
+enum class EffectType { Spark, Blood, Death, Muzzle, Corpse, Pickup };
 
 struct Effect {
     EffectType type;
@@ -55,6 +75,7 @@ struct Effect {
     float      time;      // age in seconds
     float      duration;
     uint32_t   team;
+    float      size = 18.0f;
 };
 
 struct FloatingText {
@@ -69,6 +90,23 @@ struct KillFeedEntry {
     bool        involvesPlayer;
 };
 
+// Things that happened this tick, for sound and screen shake (main.cpp).
+enum class GameEventType {
+    Shot, PlayerShot, Hit, PlayerHitEnemy, PlayerHurt, Kill, PlayerKill, PlayerDied,
+    Reload, ReloadDone, Empty, WeaponSwitch, Pickup, WallHit, Respawn,
+};
+
+struct GameEvent {
+    GameEventType type;
+    Vec2f         pos;
+    uint32_t      weapon = 0;
+};
+
+struct Announcement {
+    std::string text;
+    float       time = 99.0f;  // age
+};
+
 class Game {
 public:
     static constexpr float kTickRate = 120.0f;
@@ -80,6 +118,9 @@ public:
     void SetBotCount(int count);  // 0 .. kMaxEntities-1
     int  BotCount() const { return botCount_; }
 
+    void SetDifficulty(uint32_t d);
+    uint32_t Difficulty() const { return mem_.difficulty; }
+
     // Advance the simulation by one fixed step (kTickDt).
     void Tick(const PlayerInput& input);
 
@@ -87,6 +128,9 @@ public:
     void UpdateVisibility();
 
     bool LineOfSight(Vec2f a, Vec2f b) const;
+
+    // Events since the last call (sounds, shake). Clears the list.
+    std::vector<GameEvent> TakeEvents();
 
     // --- debug / cheat toggles (keys F2..F4) --------------------------------
     bool godMode      = false;
@@ -98,9 +142,15 @@ public:
     const std::vector<Effect>&        Effects() const { return effects_; }
     const std::vector<FloatingText>&  Texts() const { return texts_; }
     const std::vector<KillFeedEntry>& KillFeed() const { return killFeed_; }
-    const BotBrain& Brain(int slot) const { return brains_[slot]; }
+    const Announcement&               CurrentAnnouncement() const { return announcement_; }
     float PlayerHitMarker() const { return hitMarker_; }
     float PlayerDamageFlash() const { return damageFlash_; }
+    float HitFlash(int slot) const { return hitFlash_[slot]; }
+    float SpawnProtection() const { return spawnProtection_; }
+    float PlayerFireCooldown() const { return playerFireCooldown_; }
+    int   PlayerAmmo(int weapon) const { return playerAmmo_[weapon]; }
+    int   KillStreak() const { return killStreak_; }
+    float PickupRespawn(int i) const { return pickupTimers_[i]; }
 
     int shotsFired = 0;
     int shotsHit   = 0;
@@ -118,14 +168,19 @@ private:
     void UpdateBullets(float dt);
     void UpdateEffects(float dt);
     void UpdateRespawns(float dt);
+    void UpdatePickups(float dt);
 
-    void FireBullet(int slot, float angle, float speed, int damage);
+    void FireBullets(int slot, float angle, float speed, int damage, int pellets, float spread,
+                     float life, bool heavy);
     void ApplyDamage(int victim, int attacker, int damage, Vec2f hitPos, float angle);
+    void Announce(const std::string& text);
+    void Emit(GameEventType type, Vec2f pos, uint32_t weapon = 0) { events_.push_back({type, pos, weapon}); }
 
     // Moves a circle and resolves collisions with walls/arena bounds.
     // Returns the actual displacement.
     Vec2f MoveCircle(Vec2f& pos, Vec2f delta, float radius) const;
     bool  CircleHitsObstacle(Vec2f pos, float radius) const;
+    int   NearestPickup(Vec2f from, float maxDist) const;
 
     float RandF(float lo, float hi);
     int   RandI(int lo, int hi);
@@ -135,13 +190,27 @@ private:
 
     int      botCount_ = 8;
     uint32_t nextId_   = 1;
-    float    playerFireCooldown_ = 0.0f;
-    float    hitMarker_   = 0.0f;
-    float    damageFlash_ = 0.0f;
+
+    // player weapon state
+    float playerFireCooldown_ = 0.0f;
+    int   playerAmmo_[gm::kWeaponCount] = {};
+    float spawnProtection_ = 0.0f;
+
+    // feedback
+    float hitMarker_   = 0.0f;
+    float damageFlash_ = 0.0f;
+    float hitFlash_[gm::kMaxEntities] = {};
+    int   killStreak_  = 0;
+    int   multiKill_   = 0;
+    float multiKillTimer_ = 0.0f;
+    Announcement announcement_;
+
+    float pickupTimers_[gm::kMaxPickups] = {};
 
     BotBrain                   brains_[gm::kMaxEntities];
     std::vector<Bullet>        bullets_;
     std::vector<Effect>        effects_;
     std::vector<FloatingText>  texts_;
     std::vector<KillFeedEntry> killFeed_;
+    std::vector<GameEvent>     events_;
 };

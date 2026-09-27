@@ -56,7 +56,7 @@ Consequences you can measure with `aimbot bench`:
 - Each read is a **round trip** over USB + PCIe, so latency is much higher than a local
   `ReadProcessMemory`.
 - Reading 8 bytes costs about as much as reading 4 KiB, so **few big reads beat many
-  small ones**. That is why the aimbot reads the whole `GameMemory` (0xE80 bytes) in
+  small ones**. That is why the aimbot reads the whole `GameMemory` (0xF80 bytes) in
   one go instead of reading each field.
 - Memory can change while it is being read (the game writes, we read), so a snapshot
   can mix two frames. For an aimbot that's fine; `frameCount` shows how fresh the
@@ -75,7 +75,18 @@ Consequences you can measure with `aimbot bench`:
 
 This is the same idea as a *signature scan* for a byte pattern in real tools.
 
-## 5. From memory to the screen
+## 5. What the player can't see is still in memory
+
+With fog of war on, the game doesn't draw enemies that are behind walls. It still
+simulates them, though: their position, health, weapon and ammo stay in `entities[]`
+and are updated every tick. That's why `aimbot radar` shows every enemy (`e` = hidden)
+while the screen shows only the visible ones.
+
+This is how "wallhacks" and radar cheats work in real games. Anything the client has
+in RAM can be read, whatever it draws. Competitive games fight this on the server
+side and send enemy positions only when they could be visible.
+
+## 6. From memory to the screen
 
 The camera is also in memory (`camTarget`, `camOffset`, `camZoom`), so the aimbot can
 compute where an enemy is drawn:
@@ -87,10 +98,11 @@ screen = (world - camTarget) * camZoom + camOffset
 The crosshair is the mouse cursor (`mouseScreen`), so the aim error is simply
 `targetScreen - mouseScreen`, in pixels.
 
-## 6. Prediction
+## 7. Prediction
 
-Bullets take time to arrive (1300 units/s), and a bot moving at 250 units/s,
-600 units away, moves about 115 units before the bullet gets there. Aiming at the
+Bullets take time to arrive (rifle 1300, shotgun 1000, sniper 2600 units/s; the
+current value is `bulletSpeed` in memory). A bot moving at 250 units/s,
+600 units away, moves about 115 units before a rifle bullet gets there. Aiming at the
 current position misses, so the aimbot aims where the bot will be:
 
 ```
@@ -101,7 +113,7 @@ aimAt = target.pos + target.vel * t        (repeat 3x, because the distance chan
 `vel` is stored in memory. Bots change direction often, so prediction helps but
 isn't perfect.
 
-## 7. Moving the mouse (closed loop)
+## 8. Moving the mouse (closed loop)
 
 The KMBox acts as a real USB mouse for the game PC: it receives "move by
 (dx, dy) counts" and sends those as normal mouse reports. Windows turns counts into
@@ -121,14 +133,15 @@ from memory, small errors (DPI scaling, acceleration, a wrong `mouse_scale`) cor
 themselves. It only moves once per new `frameCount`: the game samples the cursor once
 per frame, and moving again before that would use stale data and overshoot.
 
-## 8. Code map
+## 9. Code map
 
 | File | Role |
 |---|---|
 | `shared/game_memory.h` | layout, shared by game and aimbot |
 | `game/src/memory_export.cpp` | defines `g_game`, prints addresses |
 | `game/src/game.cpp` | simulation, bot AI, bullets |
-| `game/src/render.cpp` | drawing, F1 debug overlay |
+| `game/src/render.cpp` | drawing, fog of war, HUD, F1 debug overlay |
+| `game/src/audio.cpp` | generated sound effects |
 | `aimbot/src/memory/memory_dma.cpp` | MemProcFS backend |
 | `aimbot/src/memory/memory_winapi.cpp` | ReadProcessMemory backend (testing) |
 | `aimbot/src/game_reader.cpp` | find `g_game`, read snapshots |

@@ -13,7 +13,9 @@
 #include <cstring>
 #include <string>
 #include <thread>
+#include <vector>
 
+#include "audio.h"
 #include "game.h"
 #include "memory_export.h"
 #include "raylib.h"
@@ -158,12 +160,20 @@ int main(int argc, char** argv) {
 
     Game game(g_game, opt.seed);
     game.SetBotCount(opt.bots);
+    g_game.fogOfWar = 1;
+
+    Audio audio;
+    if (!audio.Init()) std::printf("[audio] no audio device - running without sound\n");
 
     UiState ui;
     Camera2D cam{};
     cam.zoom = 1.0f;
     cam.target = Vector2{game.Player().pos.x, game.Player().pos.y};
     float accumulator = 0.0f;
+    float shake = 0.0f;           // screen shake strength (pixels)
+    int   pendingWeapon = -1;     // one-shot inputs wait for the next simulation tick
+    bool  pendingReload = false;
+    int   previousWeapon = gm::WEAPON_SHOTGUN;
 
     while (!WindowShouldClose()) {
         const float frameDt = std::min(GetFrameTime(), 0.1f);
@@ -177,7 +187,17 @@ int main(int argc, char** argv) {
         if (IsKeyPressed(KEY_F4)) game.botsPeaceful = !game.botsPeaceful;
         if (IsKeyPressed(KEY_H)) ui.showHelp = !ui.showHelp;
         if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_P)) ui.paused = !ui.paused;
-        if (IsKeyPressed(KEY_R)) game.Reset();
+        if (IsKeyPressed(KEY_F5)) game.Reset();
+        if (IsKeyPressed(KEY_F6)) game.SetDifficulty((game.Difficulty() + 1) % 3);
+        if (IsKeyPressed(KEY_F7)) g_game.fogOfWar = !g_game.fogOfWar;
+        if (IsKeyPressed(KEY_M)) audio.muted = ui.muted = !ui.muted;
+        ui.showScoreboard = IsKeyDown(KEY_TAB);
+        if (IsKeyPressed(KEY_R)) pendingReload = true;
+        int current = static_cast<int>(game.Player().weapon);
+        for (int w = 0; w < gm::kWeaponCount; ++w)
+            if (IsKeyPressed(static_cast<KeyboardKey>(KEY_ONE + w)) && w != current) pendingWeapon = w;
+        if (IsKeyPressed(KEY_Q)) pendingWeapon = previousWeapon;
+        if (pendingWeapon >= 0 && pendingWeapon != current) previousWeapon = current;
         if (IsKeyPressed(KEY_EQUAL) || IsKeyPressed(KEY_KP_ADD)) game.SetBotCount(game.BotCount() + 1);
         if (IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT)) game.SetBotCount(game.BotCount() - 1);
         float wheel = GetMouseWheelMove();
@@ -199,6 +219,8 @@ int main(int argc, char** argv) {
         Vector2 aim = GetScreenToWorld2D(mouse, cam);
         in.aimWorld = {aim.x, aim.y};
         in.shoot = (buttons & gm::BUTTON_LEFT) && !ui.showHelp;
+        in.reload = pendingReload;
+        in.selectWeapon = pendingWeapon;
 
         // ---- simulation (fixed time step) ------------------------------------------
         if (!ui.paused && !ui.showHelp) {
@@ -206,10 +228,29 @@ int main(int argc, char** argv) {
             while (accumulator >= Game::kTickDt) {
                 game.Tick(in);
                 accumulator -= Game::kTickDt;
+                // one-shot inputs only for the first tick
+                in.reload = pendingReload = false;
+                in.selectWeapon = pendingWeapon = -1;
             }
         }
 
+        // ---- sound + screen shake from this frame's events ---------------------------
+        std::vector<GameEvent> events = game.TakeEvents();
+        audio.PlayEvents(events, game.Player().pos);
+        for (const GameEvent& e : events) {
+            if (e.type == GameEventType::PlayerShot) shake = std::max(shake, GetWeaponDef(e.weapon).shake);
+            if (e.type == GameEventType::PlayerHurt) shake = std::max(shake, 5.0f);
+            if (e.type == GameEventType::PlayerDied) shake = std::max(shake, 10.0f);
+        }
+        shake *= std::exp(-14.0f * frameDt);
+
         UpdateCamera(cam, g_game, game.Player().pos, frameDt);
+        if (shake > 0.2f) {
+            // The shaken camera is also what gets published to memory, so an
+            // external tool always sees exactly the camera that was drawn.
+            cam.offset.x += static_cast<float>(GetRandomValue(-100, 100)) / 100.0f * shake;
+            cam.offset.y += static_cast<float>(GetRandomValue(-100, 100)) / 100.0f * shake;
+        }
         PublishCameraAndInput(cam, mouse, buttons, ui.paused || ui.showHelp);
 
         // ---- draw ---------------------------------------------------------------------
@@ -218,6 +259,7 @@ int main(int argc, char** argv) {
         EndDrawing();
     }
 
+    ShutdownRenderer();
     CloseWindow();
     return 0;
 }

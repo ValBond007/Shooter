@@ -17,7 +17,7 @@ public:
     // Finds the address of g_game in the attached process.
     bool Locate();
 
-    // Reads the whole GameMemory struct (one read of 0xE80 bytes) and checks
+    // Reads the whole GameMemory struct (one read of 0xF80 bytes) and checks
     // that it is still valid. Returns false if the read failed or the magic
     // is wrong (e.g. the game was closed/restarted -> call Locate() again).
     bool ReadSnapshot(gm::GameMemory& out);

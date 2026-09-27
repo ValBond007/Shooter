@@ -58,6 +58,9 @@ AimResult Aimbot::Update(const gm::GameMemory& g) {
 
         gm::Vec2f world = cfg_.prediction ? PredictAimPoint(me, e, g.bulletSpeed) : e.pos;
         gm::Vec2f screen = gm::WorldToScreen(g, world);
+        // Only aim at points inside the window, otherwise we would drag the
+        // cursor out of the game.
+        if (screen.x < 2 || screen.y < 2 || screen.x > g.screenWidth - 2 || screen.y > g.screenHeight - 2) continue;
         float d = Dist(screen, crosshair);
 
         // Keep the locked target as long as it is valid (and not too far out).

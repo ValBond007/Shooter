@@ -17,6 +17,7 @@ add_executable(shooter
     src/main.cpp
     src/game.cpp
     src/render.cpp
+    src/audio.cpp
     src/memory_export.cpp
 )
 target_include_directories(shooter PRIVATE src ${PROJECT_SOURCE_DIR}/shared)

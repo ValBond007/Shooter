@@ -149,6 +149,29 @@ bool ReadOrReconnect(MemoryReader& mem, GameReader& reader, const Config& cfg, g
     return false;
 }
 
+const char* KindText(uint32_t k) {
+    switch (k) {
+        case gm::KIND_PLAYER:  return "player";
+        case gm::KIND_SOLDIER: return "soldier";
+        case gm::KIND_RUNNER:  return "runner";
+        case gm::KIND_HEAVY:   return "heavy";
+        default:               return "?";
+    }
+}
+
+const char* WeaponText(uint32_t w) {
+    switch (w) {
+        case gm::WEAPON_RIFLE:   return "rifle";
+        case gm::WEAPON_SHOTGUN: return "shotgun";
+        case gm::WEAPON_SNIPER:  return "sniper";
+        default:                 return "?";
+    }
+}
+
+const char* DifficultyText(uint32_t d) {
+    return d == gm::DIFFICULTY_EASY ? "easy" : (d == gm::DIFFICULTY_HARD ? "hard" : "normal");
+}
+
 std::string EntityName(const gm::Entity& e) {
     char name[gm::kNameLength + 1] = {};
     std::memcpy(name, e.name, gm::kNameLength);  // may not be zero terminated if memory is garbage
@@ -216,16 +239,28 @@ int RunDump(MemoryReader& mem, GameReader& reader, const Config& cfg, const Args
                     g.mouseScreen.x, g.mouseScreen.y, g.mouseWorld.x, g.mouseWorld.y,
                     (g.buttons & gm::BUTTON_LEFT) ? "L" : "-", (g.buttons & gm::BUTTON_MIDDLE) ? "M" : "-",
                     (g.buttons & gm::BUTTON_RIGHT) ? "R" : "-", g.paused ? "PAUSED" : "");
+        std::printf("difficulty %s   fog of war %s   bullet speed %.0f (current weapon)\x1b[K\n",
+                    DifficultyText(g.difficulty), g.fogOfWar ? "on" : "off", g.bulletSpeed);
         std::printf("\x1b[K\n");
-        std::printf(" idx  name            team alive  hp    pos.x   pos.y   vel.x  vel.y  angle  vis  K/D    screen\x1b[K\n");
+        std::printf(" idx  name            kind    alive  hp    pos.x   pos.y   vel.x  vel.y  vis  weapon  ammo  K/D    screen\x1b[K\n");
         for (int i = 0; i < gm::kMaxEntities; ++i) {
             const gm::Entity& e = g.entities[i];
             if (!e.active) continue;
             gm::Vec2f s = gm::WorldToScreen(g, e.pos);
-            std::printf(" %3d  %-15s %4u %5u %4d  %7.1f %7.1f %6.0f %6.0f %6.2f %4u %3d/%-3d (%5.0f,%5.0f)\x1b[K\n", i,
-                        EntityName(e).c_str(), e.team, e.alive, e.health, e.pos.x, e.pos.y, e.vel.x, e.vel.y,
-                        e.aimAngle, e.visible, e.kills, e.deaths, s.x, s.y);
+            char ammo[16];
+            if (e.reloadTimer > 0.0f) std::snprintf(ammo, sizeof(ammo), "R%.1f", e.reloadTimer);
+            else std::snprintf(ammo, sizeof(ammo), "%d", e.ammo);
+            std::printf(" %3d  %-15s %-7s %5u %4d  %7.1f %7.1f %6.0f %6.0f %4u  %-7s %4s  %3d/%-3d (%5.0f,%5.0f)\x1b[K\n",
+                        i, EntityName(e).c_str(), KindText(e.kind), e.alive, e.health, e.pos.x, e.pos.y, e.vel.x,
+                        e.vel.y, e.visible, WeaponText(e.weapon), ammo, e.kills, e.deaths, s.x, s.y);
         }
+        std::printf("\x1b[K\nhealth packs:");
+        for (int i = 0; i < gm::kMaxPickups; ++i) {
+            const gm::Pickup& p = g.pickups[i];
+            if (p.pos.x == 0.0f && p.pos.y == 0.0f) continue;
+            std::printf("  (%.0f,%.0f)%s", p.pos.x, p.pos.y, p.available ? "" : "x");
+        }
+        std::printf("\x1b[K\n");
         std::printf("\x1b[J");  // clear the rest of the screen
         std::fflush(stdout);
     }
@@ -259,6 +294,13 @@ int RunRadar(MemoryReader& mem, GameReader& reader, const Config& cfg, const Arg
             for (int y = y0; y <= y1; ++y)
                 for (int x = x0; x <= x1; ++x) grid[y][x] = '#';
         }
+        for (int i = 0; i < gm::kMaxPickups; ++i) {
+            const gm::Pickup& p = g.pickups[i];
+            if (!p.available) continue;
+            int x, y;
+            cell(p.pos.x, p.pos.y, x, y);
+            grid[y][x] = '+';
+        }
         const gm::Entity& me = g.entities[g.localPlayerIndex % gm::kMaxEntities];
         for (int i = 0; i < gm::kMaxEntities; ++i) {
             const gm::Entity& e = g.entities[i];
@@ -269,7 +311,7 @@ int RunRadar(MemoryReader& mem, GameReader& reader, const Config& cfg, const Arg
         }
 
         CursorHome();
-        std::printf("Arena Shooter - radar (from memory)   @ you   E enemy (visible)   e enemy (hidden)   # wall\x1b[K\n");
+        std::printf("Arena Shooter - radar (from memory)   @ you   E enemy (visible)   e enemy (hidden)   + health   # wall\x1b[K\n");
         std::printf("+%s+\n", std::string(W, '-').c_str());
         for (const std::string& row : grid) std::printf("|%s|\n", row.c_str());
         std::printf("+%s+\n", std::string(W, '-').c_str());
@@ -310,7 +352,7 @@ int RunBench(MemoryReader& mem, GameReader& reader, const Config& cfg) {
     std::printf("\nmemory backend: %s\n\n", mem.Name());
     bench("8 bytes (one value)", 8, 2000);
     bench("0x60 bytes (one entity)", sizeof(gm::Entity), 2000);
-    bench("0xE80 bytes (whole game)", sizeof(gm::GameMemory), 2000);
+    bench("0xF80 bytes (whole game)", sizeof(gm::GameMemory), 2000);
     std::printf("\nReading the whole struct at once is much cheaper than reading every\n"
                 "field separately (%zu single reads would be needed for all entities).\n",
                 static_cast<size_t>(gm::kMaxEntities) * 15);
