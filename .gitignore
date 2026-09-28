@@ -1,0 +1,12 @@
+# build output
+build*/
+out/
+.vs/
+CMakeSettings.json
+CMakeUserPresets.json
+
+# generated at runtime
+shooter_offsets.txt
+screenshot*.png
+shooter_results.csv
+shooter_settings.ini
