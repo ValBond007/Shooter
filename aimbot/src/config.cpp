@@ -67,6 +67,8 @@ bool Config::Load(const std::string& path) {
         else if (key == "visible_only") visibleOnly = ParseBool(val);
         else if (key == "sticky_target") stickyTarget = ParseBool(val);
         else if (key == "poll_interval_us") pollIntervalUs = std::max(0, std::atoi(val.c_str()));
+        else if (key == "move_interval_ms") moveIntervalMs = std::max(0.0f, std::strtof(val.c_str(), nullptr));
+        else if (key == "move_timeout_ms") moveTimeoutMs = std::max(1.0f, std::strtof(val.c_str(), nullptr));
         else std::fprintf(stderr, "[config] %s:%d: unknown key '%s'\n", path.c_str(), lineNo, key.c_str());
     }
     return true;
@@ -80,6 +82,7 @@ void Config::Print() const {
     std::printf("  mouse        = %s\n", mouse.c_str());
     std::printf("  aim_key      = %s   fov %.0f px   smooth %.1f   max_step %.0f   mouse_scale %.3f\n",
                 aimKey.c_str(), fov, smooth, maxStep, mouseScale);
+    std::printf("  move_interval_ms %.1f   move_timeout_ms %.0f\n", moveIntervalMs, moveTimeoutMs);
     std::printf("  prediction   = %s   visible_only %s   sticky_target %s\n", prediction ? "on" : "off",
                 visibleOnly ? "on" : "off", stickyTarget ? "on" : "off");
 }

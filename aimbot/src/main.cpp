@@ -468,42 +468,64 @@ int RunAim(MemoryReader& mem, GameReader& reader, MouseOutput& mouse, const Conf
 
     Aimbot aimbot(cfg);
     gm::GameMemory g{};
+    AimResult r;
     uint32_t lastFrame = 0;
     double start = NowSeconds(), lastStatus = 0;
     int reads = 0, frames = 0, moves = 0;
 
+    // Feedback control: after a move we wait until the game shows that it
+    // arrived (cursor position in memory changed) before sending the next
+    // one. Otherwise moves pile up in the KMBox / USB queue while we keep
+    // "correcting" from an old cursor position -> overshooting.
+    bool      waitingForFeedback = false;
+    gm::Vec2f mouseAtMove{0, 0};
+    double    lastMoveTime = -1.0;
+    const double minInterval = cfg.moveIntervalMs / 1000.0;
+    const double feedbackTimeout = cfg.moveTimeoutMs / 1000.0;
+
     while (!TimeUp(args, start)) {
         if (!ReadOrReconnect(mem, reader, cfg, g)) continue;
         ++reads;
+        const double now = NowSeconds();
 
-        // Only react to NEW frames: the game samples the cursor once per frame,
-        // so moving more often than that would use stale data (overshooting).
+        // Only react to NEW frames: the game samples the cursor once per frame.
         if (g.frameCount != lastFrame) {
             lastFrame = g.frameCount;
             ++frames;
-            AimResult r = aimbot.Update(g);
-            if (r.moveX != 0 || r.moveY != 0) {
-                mouse.Move(r.moveX, r.moveY);
-                ++moves;
-            }
 
-            double now = NowSeconds();
-            if (now - lastStatus >= 0.1) {
-                double dt = now - lastStatus;
-                lastStatus = now;
-                const gm::Entity& me = g.entities[g.localPlayerIndex % gm::kMaxEntities];
-                char target[96] = "-";
-                if (r.hasTarget) {
-                    const gm::Entity& t = g.entities[r.targetIndex];
-                    std::snprintf(target, sizeof(target), "%s (hp %d) err %.0f px", EntityName(t).c_str(),
-                                  t.health, std::hypot(r.error.x, r.error.y));
-                }
-                std::printf("\r[%s] reads/s %5d  frames/s %4d  moves/s %4d | hp %3d  K %d D %d | target %-34s",
-                            r.keyHeld ? "AIM" : "   ", static_cast<int>(reads / dt), static_cast<int>(frames / dt),
-                            static_cast<int>(moves / dt), me.health, me.kills, me.deaths, target);
-                std::fflush(stdout);
-                reads = frames = moves = 0;
+            if (waitingForFeedback) {
+                bool arrived = g.mouseScreen.x != mouseAtMove.x || g.mouseScreen.y != mouseAtMove.y;
+                if (arrived || now - lastMoveTime > feedbackTimeout) waitingForFeedback = false;
             }
+            bool canMove = !waitingForFeedback && now - lastMoveTime >= minInterval;
+
+            if (canMove) {
+                r = aimbot.Update(g);
+                if (r.moveX != 0 || r.moveY != 0) {
+                    mouse.Move(r.moveX, r.moveY);
+                    ++moves;
+                    waitingForFeedback = true;
+                    mouseAtMove = g.mouseScreen;
+                    lastMoveTime = now;
+                }
+            }
+        }
+
+        if (now - lastStatus >= 0.1) {
+            double dt = now - lastStatus;
+            lastStatus = now;
+            const gm::Entity& me = g.entities[g.localPlayerIndex % gm::kMaxEntities];
+            char target[96] = "-";
+            if (r.hasTarget && r.targetIndex >= 0) {
+                const gm::Entity& t = g.entities[r.targetIndex];
+                std::snprintf(target, sizeof(target), "%s (hp %d) err %.0f px", EntityName(t).c_str(), t.health,
+                              std::hypot(r.error.x, r.error.y));
+            }
+            std::printf("\r[%s] reads/s %5d  frames/s %5d  moves/s %4d | hp %3d  K %d D %d | target %-34s",
+                        r.keyHeld ? "AIM" : "   ", static_cast<int>(reads / dt), static_cast<int>(frames / dt),
+                        static_cast<int>(moves / dt), me.health, me.kills, me.deaths, target);
+            std::fflush(stdout);
+            reads = frames = moves = 0;
         }
         SleepMicros(cfg.pollIntervalUs);
     }

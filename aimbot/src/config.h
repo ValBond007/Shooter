@@ -34,6 +34,8 @@ struct Config {
 
     // ---- loop --------------------------------------------------------------------
     int         pollIntervalUs = 500;   // pause between memory reads (microseconds)
+    float       moveIntervalMs = 4.0f;  // min. time between two mouse moves
+    float       moveTimeoutMs  = 40.0f; // max. wait for a move to show up in the game
 
     bool Load(const std::string& path);
     void Print() const;
